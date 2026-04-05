@@ -1,0 +1,27 @@
+{
+    "name": "wpbackup/wpbackup-migrator",
+    "description": "Migrate and backup WordPress sites",
+    "type": "wordpress-plugin",
+    "license": "GPLv3",
+    "autoload": {
+        "psr-4": {
+            "Wpbackup\\Migrator\\": "includes/"
+        }
+    },
+    "authors": [
+        {
+            "name": "WPBackup",
+            "email": "support@wpbackup.org"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require-dev": {
+        "tareq1988/wp-php-cs-fixer": "dev-master",
+        "wp-coding-standards/wpcs": "dev-develop"
+    },
+    "config": {
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    }
+}
