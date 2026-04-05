@@ -64,13 +64,11 @@ function demo_normalize_site_base( string $raw ): string {
 }
 
 /**
- * Prüft, ob die Plugin-REST-Route erreichbar ist (anonym: erwartet 401 „nur für Admins“).
+ * GET-Anfrage, liefert HTTP-Status und Body (für REST-Probes).
  *
- * @return array{ok: bool, status: int, message: string, detail: string}
+ * @return array{status: int, body: string, url: string}
  */
-function demo_probe_wpbackup_rest( string $site_base ): array {
-	$url = rtrim( $site_base, '/' ) . REST_INFO_PATH;
-
+function demo_http_get_probe( string $url ): array {
 	$ctx = stream_context_create(
 		[
 			'http' => [
@@ -86,7 +84,7 @@ function demo_probe_wpbackup_rest( string $site_base ): array {
 		]
 	);
 
-	$body = @file_get_contents( $url, false, $ctx );
+	$body   = @file_get_contents( $url, false, $ctx );
 	$status = 0;
 	if ( isset( $http_response_header ) && is_array( $http_response_header ) ) {
 		foreach ( $http_response_header as $line ) {
@@ -97,39 +95,55 @@ function demo_probe_wpbackup_rest( string $site_base ): array {
 		}
 	}
 
-	if ( $status === 0 ) {
-		return [
-			'ok'      => false,
-			'status'  => 0,
-			'message' => 'Keine Verbindung oder TLS-Fehler.',
-			'detail'  => $url,
-		];
+	return [
+		'status' => $status,
+		'body'   => $body !== false ? (string) $body : '',
+		'url'    => $url,
+	];
+}
+
+/**
+ * Prüft (1) WordPress-Kern-REST unter /wp-json/ und (2) Plugin-Route /info ohne Auth.
+ *
+ * @return array{
+ *   wordpress: array{ok: bool, status: int, url: string, detail: string},
+ *   plugin: array{installed: bool, status: int, url: string, detail: string},
+ *   authorize_ok: bool
+ * }
+ */
+function demo_probe_wordpress_and_plugin( string $site_base ): array {
+	$base    = rtrim( $site_base, '/' );
+	$wp_resp = demo_http_get_probe( $base . '/wp-json/' );
+	$in_resp = demo_http_get_probe( $base . REST_INFO_PATH );
+
+	$is_wordpress = false;
+	if ( $wp_resp['status'] === 200 && $wp_resp['body'] !== '' ) {
+		$data = json_decode( $wp_resp['body'], true );
+		if ( is_array( $data ) && ( isset( $data['namespaces'] ) || isset( $data['routes'] ) ) ) {
+			$is_wordpress = true;
+		}
 	}
 
-	$route_ok = ( $status === 401 || $status === 403 );
-	if ( $route_ok ) {
-		return [
-			'ok'      => true,
-			'status'  => $status,
-			'message' => 'REST-Route /info ist erreichbar (Auth erforderlich, wie erwartet).',
-			'detail'  => $body !== false ? (string) $body : '',
-		];
-	}
+	// /info ohne Login: Route registriert → typisch 401/403 (Administrator erforderlich).
+	$plugin_installed = ( $in_resp['status'] === 401 || $in_resp['status'] === 403 );
 
-	if ( $status === 404 ) {
-		return [
-			'ok'      => false,
-			'status'  => 404,
-			'message' => 'Route nicht gefunden – ist WPBackup Migrator installiert und aktiv?',
-			'detail'  => $body !== false ? (string) $body : '',
-		];
-	}
+	$detail_wp = strlen( $wp_resp['body'] ) > 2000 ? substr( $wp_resp['body'], 0, 2000 ) . '…' : $wp_resp['body'];
+	$detail_in = strlen( $in_resp['body'] ) > 2000 ? substr( $in_resp['body'], 0, 2000 ) . '…' : $in_resp['body'];
 
 	return [
-		'ok'      => false,
-		'status'  => $status,
-		'message' => 'Unerwarteter HTTP-Status.',
-		'detail'  => $body !== false ? (string) $body : '',
+		'wordpress' => [
+			'ok'     => $is_wordpress,
+			'status' => $wp_resp['status'],
+			'url'    => $wp_resp['url'],
+			'detail' => $detail_wp,
+		],
+		'plugin'    => [
+			'installed' => $plugin_installed,
+			'status'    => $in_resp['status'],
+			'url'       => $in_resp['url'],
+			'detail'    => $detail_in,
+		],
+		'authorize_ok' => $is_wordpress,
 	];
 }
 
@@ -298,22 +312,24 @@ $has_wp_app_redirect = isset( $_GET['user_login'], $_GET['password'] )
 	&& is_string( $_GET['password'] );
 
 $form_site = DEMO_DEFAULT_SITE;
-if ( isset( $_POST['site'] ) && is_string( $_POST['site'] ) ) {
-	$form_site = demo_normalize_site_base( $_POST['site'] ) ?: DEMO_DEFAULT_SITE;
-} elseif ( isset( $_GET['wpbackup_demo_site'] ) && is_string( $_GET['wpbackup_demo_site'] ) ) {
-	$form_site = demo_normalize_site_base( (string) $_GET['wpbackup_demo_site'] ) ?: DEMO_DEFAULT_SITE;
+if ( isset( $_GET['wpbackup_demo_site'] ) && is_string( $_GET['wpbackup_demo_site'] ) ) {
+	$normalized = demo_normalize_site_base( (string) $_GET['wpbackup_demo_site'] );
+	if ( $normalized !== '' ) {
+		$form_site = $normalized;
+	}
 }
 
 $probe = null;
-if ( isset( $_POST['check_rest'] ) && $_POST['check_rest'] === '1' ) {
-	$probe = demo_probe_wpbackup_rest( $form_site );
-	if ( is_array( $probe ) && $probe['ok'] ) {
-		$_SESSION['wpbackup_demo_rest_ok_site'] = $form_site;
-	}
+$should_probe = false;
+if ( isset( $_GET['wpbackup_demo_site'] ) && is_string( $_GET['wpbackup_demo_site'] ) && trim( $_GET['wpbackup_demo_site'] ) !== '' ) {
+	$should_probe = true;
 }
-if ( $probe === null && $has_wp_app_redirect && $form_site !== '' ) {
-	$probe = demo_probe_wpbackup_rest( $form_site );
-	if ( is_array( $probe ) && $probe['ok'] ) {
+if ( $has_wp_app_redirect ) {
+	$should_probe = true;
+}
+if ( $should_probe && $form_site !== '' ) {
+	$probe = demo_probe_wordpress_and_plugin( $form_site );
+	if ( is_array( $probe ) && ! empty( $probe['authorize_ok'] ) ) {
 		$_SESSION['wpbackup_demo_rest_ok_site'] = $form_site;
 	}
 }
@@ -321,7 +337,7 @@ if ( $probe === null && $has_wp_app_redirect && $form_site !== '' ) {
 $rest_ok_session = isset( $_SESSION['wpbackup_demo_rest_ok_site'] )
 	&& is_string( $_SESSION['wpbackup_demo_rest_ok_site'] )
 	&& $_SESSION['wpbackup_demo_rest_ok_site'] === $form_site;
-$auth_enabled = ( is_array( $probe ) && $probe['ok'] ) || $rest_ok_session;
+$auth_enabled = ( is_array( $probe ) && ! empty( $probe['authorize_ok'] ) ) || $rest_ok_session;
 
 $self_url    = demo_callback_self_url();
 $success_url = $self_url . '?wpbackup_demo_site=' . rawurlencode( $form_site );
@@ -408,41 +424,52 @@ header( 'Content-Type: text/html; charset=utf-8' );
 <h1>WPBackup Migrator – Aktivierungs-Demo</h1>
 
 <p class="note">
-	Dieses Skript zeigt den Ablauf: WordPress-URL prüfen → <strong>Application Password</strong> über
+	Dieses Skript zeigt den Ablauf: WordPress-URL prüfen (Kern-REST <code>/wp-json/</code> + optional Plugin <code>/info</code>) → <strong>Application Password</strong> über
 	<code>authorize-application.php</code> → Redirect zurück auf diese Callback-URL → optional
-	<code>migration_key</code> dekodieren → REST <code>GET /wp-json/wpbackup-migrator/v1/info</code>
-	(u. a. <code>database_size</code>, <code>media_size</code> – geschätzte Mediathek ohne Filesystem-Scan; siehe <code>docs/rest-api.md</code>).
+	<code>migration_key</code> dekodieren → REST <code>GET …/v1/info</code>
+	(u. a. <code>database_size</code>, <code>media_size</code>; siehe <code>docs/rest-api.md</code>).
 </p>
 
-<h2>1) WordPress-URL &amp; REST-Erreichbarkeit</h2>
-<form method="post" action="">
+<h2>1) WordPress-URL &amp; REST-Status</h2>
+<p class="note">Gültige URL eingeben – die Prüfung startet automatisch (kein separater Button).</p>
+<form method="get" action="" id="demo-site-form">
 	<div class="row">
 		<label for="site">HTTPS-Domain (WordPress-Startseite)</label>
-		<input type="url" id="site" name="site" value="<?php echo htmlspecialchars( $form_site, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>" required placeholder="https://example.com">
+		<input type="url" id="site" name="wpbackup_demo_site" value="<?php echo htmlspecialchars( $form_site, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>" required placeholder="https://example.com" autocomplete="url">
 	</div>
-	<button type="submit" name="check_rest" value="1" class="secondary">REST prüfen (/info, ohne Auth)</button>
 </form>
 
 <?php if ( is_array( $probe ) ) : ?>
-	<p class="check">
-		<?php if ( $probe['ok'] ) : ?>
-			<span class="ok">✓</span>
-			<span><?php echo htmlspecialchars( $probe['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></span>
-			<span class="note">(HTTP <?php echo (int) $probe['status']; ?>)</span>
-		<?php else : ?>
-			<span class="bad">✗</span>
-			<span><?php echo htmlspecialchars( $probe['message'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></span>
-			<span class="note">(HTTP <?php echo (int) $probe['status']; ?>)</span>
-		<?php endif; ?>
-	</p>
-	<?php if ( $probe['detail'] !== '' ) : ?>
-		<details>
-			<summary>Technische Details</summary>
-			<pre><?php echo htmlspecialchars( $probe['detail'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
-		</details>
-	<?php endif; ?>
+	<div class="probe-results">
+		<p class="check">
+			<?php if ( ! empty( $probe['wordpress']['ok'] ) ) : ?>
+				<span class="ok">✓</span>
+				<span><strong>WordPress-REST-API</strong> erreichbar: <code>/wp-json/</code> liefert eine typische Index-Antwort (HTTP <?php echo (int) $probe['wordpress']['status']; ?>).</span>
+			<?php else : ?>
+				<span class="bad">✗</span>
+				<span><strong>WordPress-REST-API</strong> nicht erkannt unter <code><?php echo htmlspecialchars( $probe['wordpress']['url'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code>
+					(HTTP <?php echo (int) $probe['wordpress']['status']; ?> – erwartet wird u. a. JSON mit <code>namespaces</code> / <code>routes</code>).</span>
+			<?php endif; ?>
+		</p>
+		<p class="check">
+			<?php if ( ! empty( $probe['plugin']['installed'] ) ) : ?>
+				<span class="ok">✓</span>
+				<span><strong>WPBackup Migrator</strong>: Route <code><?php echo htmlspecialchars( REST_INFO_PATH, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code> ist registriert (HTTP <?php echo (int) $probe['plugin']['status']; ?>, Authentifizierung erforderlich – Plugin aktiv).</span>
+			<?php else : ?>
+				<span class="bad">○</span>
+				<span><strong>WPBackup Migrator</strong>: Endpunkt <code><?php echo htmlspecialchars( REST_INFO_PATH, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code> noch nicht erreichbar oder nicht installiert (HTTP <?php echo (int) $probe['plugin']['status']; ?>). Nach Installation erscheint hier üblicherweise 401/403 ohne Login.</span>
+			<?php endif; ?>
+		</p>
+	</div>
+	<details>
+		<summary>Technische Details (Rohantworten, gekürzt)</summary>
+		<p><strong>GET</strong> <code><?php echo htmlspecialchars( $probe['wordpress']['url'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></p>
+		<pre><?php echo htmlspecialchars( $probe['wordpress']['detail'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
+		<p><strong>GET</strong> <code><?php echo htmlspecialchars( $probe['plugin']['url'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></p>
+		<pre><?php echo htmlspecialchars( $probe['plugin']['detail'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
+	</details>
 <?php elseif ( $rest_ok_session ) : ?>
-	<p class="check"><span class="ok">✓</span> <span>REST für diese Domain wurde in dieser Browser-Session bereits erfolgreich geprüft.</span></p>
+	<p class="check"><span class="ok">✓</span> <span>WordPress-REST für diese Domain wurde in dieser Session bereits als erreichbar gespeichert.</span></p>
 <?php endif; ?>
 
 <h2>2) WPBackup.org bei WordPress autorisieren</h2>
@@ -458,7 +485,7 @@ header( 'Content-Type: text/html; charset=utf-8' );
 		WPBackup.org bei WordPress autorisieren
 	</a>
 	<?php if ( ! $auth_enabled ) : ?>
-		<br><span class="note">Zuerst „REST prüfen“ mit positivem Ergebnis ausführen.</span>
+		<br><span class="note">Zuerst eine gültige WordPress-URL eintragen; die Kern-REST-API (<code>/wp-json/</code>) muss erreichbar sein.</span>
 	<?php endif; ?>
 </p>
 <p class="note"><strong>success_url</strong> (immer <code>https://</code>):<br><code><?php echo htmlspecialchars( $success_url, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></p>
@@ -626,6 +653,51 @@ header( 'Content-Type: text/html; charset=utf-8' );
 	<li>Der Parameter <code>migration_key</code> gehört <strong>nicht</strong> zum Standard-Redirect von WordPress; er kann ergänzt werden oder man kopiert den Key aus den WP-Einstellungen zum Testen:
 		<code>?migration_key=…</code> an diese URL anhängen.</li>
 </ul>
+
+<script>
+(function () {
+	var input = document.getElementById('site');
+	var form = document.getElementById('demo-site-form');
+	if (!input || !form) return;
+	var debounceMs = 550;
+	var t = null;
+	// URL mit http(s), Host, optional Pfad (z. B. Unterverzeichnis-WordPress)
+	var urlLine = /^https?:\/\/[^\s/$.?#].[^\s]*$/i;
+
+	function currentParamSite() {
+		var q = new URLSearchParams(window.location.search);
+		return q.get('wpbackup_demo_site') || '';
+	}
+
+	function navigateIfValid() {
+		var raw = (input.value || '').trim();
+		if (!raw || !urlLine.test(raw)) return;
+		try {
+			var u = new URL(raw);
+			if (u.protocol !== 'http:' && u.protocol !== 'https:') return;
+		} catch (e) {
+			return;
+		}
+		if (currentParamSite() === raw) return;
+		var q = new URLSearchParams(window.location.search);
+		q.set('wpbackup_demo_site', raw);
+		window.location.search = q.toString();
+	}
+
+	function scheduleProbe() {
+		clearTimeout(t);
+		t = setTimeout(navigateIfValid, debounceMs);
+	}
+
+	input.addEventListener('input', scheduleProbe);
+	input.addEventListener('change', function () { clearTimeout(t); navigateIfValid(); });
+
+	// Erste Anzeige ohne Query: Standard-URL im Feld → automatisch testen
+	if (!currentParamSite() && input.value.trim() && urlLine.test(input.value.trim())) {
+		scheduleProbe();
+	}
+})();
+</script>
 
 </body>
 </html>
