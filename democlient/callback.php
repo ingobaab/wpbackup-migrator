@@ -265,6 +265,30 @@ function demo_mask_secret( string $s ): string {
 	return substr( $s, 0, 4 ) . str_repeat( '*', max( 4, strlen( $s ) - 4 ) );
 }
 
+/**
+ * Bytezahl für Anzeige (Democlient).
+ */
+function demo_format_bytes( int $bytes ): string {
+	if ( $bytes < 0 ) {
+		$bytes = 0;
+	}
+	$units = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
+	$n       = (float) $bytes;
+	$u       = 0;
+	while ( $n >= 1024.0 && $u < count( $units ) - 1 ) {
+		$n /= 1024.0;
+		++$u;
+	}
+	return sprintf( '%.2f %s', $n, $units[ $u ] );
+}
+
+/**
+ * Boolesche Werte für Tabellen (Democlient).
+ */
+function demo_bool_de( bool $v ): string {
+	return $v ? 'ja' : 'nein';
+}
+
 // -----------------------------------------------------------------------------
 // Eingaben
 // -----------------------------------------------------------------------------
@@ -373,6 +397,10 @@ header( 'Content-Type: text/html; charset=utf-8' );
 		th, td { border: 1px solid #dcdcde; padding: 0.4rem 0.5rem; text-align: left; vertical-align: top; }
 		th { background: #f0f0f1; }
 		.note { font-size: 0.9rem; color: #50575e; }
+		.table-wrap { overflow-x: auto; margin: 0.75rem 0 1.25rem; -webkit-overflow-scrolling: touch; }
+		.table-wrap table { font-size: 0.82rem; }
+		.table-wrap caption { text-align: left; font-weight: 700; margin-bottom: 0.35rem; }
+		.table-wrap td.name { white-space: normal; max-width: 16rem; }
 	</style>
 </head>
 <body>
@@ -382,7 +410,8 @@ header( 'Content-Type: text/html; charset=utf-8' );
 <p class="note">
 	Dieses Skript zeigt den Ablauf: WordPress-URL prüfen → <strong>Application Password</strong> über
 	<code>authorize-application.php</code> → Redirect zurück auf diese Callback-URL → optional
-	<code>migration_key</code> dekodieren → REST <code>GET /wp-json/wpbackup-migrator/v1/info</code>.
+	<code>migration_key</code> dekodieren → REST <code>GET /wp-json/wpbackup-migrator/v1/info</code>
+	(u. a. <code>database_size</code>, <code>media_size</code> – geschätzte Mediathek ohne Filesystem-Scan; siehe <code>docs/rest-api.md</code>).
 </p>
 
 <h2>1) WordPress-URL &amp; REST-Erreichbarkeit</h2>
@@ -486,6 +515,9 @@ header( 'Content-Type: text/html; charset=utf-8' );
 
 <?php if ( $info_result !== null ) : ?>
 	<h2>5) REST API <code>GET …/v1/info</code> (Basic Auth mit Application Password)</h2>
+	<p class="note">
+		Die Antwort enthält u. a. <code>media_size</code> (Bytes, Schätzung aus DB-Metadaten für Hauptdateien und Thumbnails, ohne Uploads-Verzeichnis zu scannen).
+	</p>
 	<p>URL: <code><?php echo htmlspecialchars( rtrim( $wp_base_for_info, '/' ) . REST_INFO_PATH, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></p>
 	<p>HTTP-Status: <strong><?php echo (int) $info_result['status']; ?></strong></p>
 	<?php if ( $info_result['error'] !== '' ) : ?>
@@ -495,7 +527,87 @@ header( 'Content-Type: text/html; charset=utf-8' );
 		$json = json_decode( $info_result['body'], true );
 		?>
 		<?php if ( is_array( $json ) ) : ?>
-			<pre><?php echo htmlspecialchars( json_encode( $json, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
+			<?php if ( isset( $json['media_size'] ) && is_numeric( $json['media_size'] ) ) : ?>
+				<p><strong>media_size:</strong>
+					<code><?php echo (int) $json['media_size']; ?></code> Bytes
+					(≈ <?php echo htmlspecialchars( demo_format_bytes( (int) $json['media_size'] ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>)
+				</p>
+			<?php endif; ?>
+
+			<?php if ( ! empty( $json['list_plugins'] ) && is_array( $json['list_plugins'] ) ) : ?>
+				<div class="table-wrap">
+					<table>
+						<caption>Plugins (<code>list_plugins</code>)</caption>
+						<thead>
+							<tr>
+								<th scope="col">Name</th>
+								<th scope="col">Version</th>
+								<th scope="col">aktiv</th>
+								<th scope="col">Slug</th>
+								<th scope="col">Update</th>
+								<th scope="col">MU</th>
+								<th scope="col">Netzwerk</th>
+								<th scope="col">PHP</th>
+								<th scope="col">WP</th>
+							</tr>
+						</thead>
+						<tbody>
+							<?php foreach ( $json['list_plugins'] as $pl ) : ?>
+								<?php if ( ! is_array( $pl ) ) { continue; } ?>
+								<tr>
+									<td class="name"><?php echo htmlspecialchars( (string) ( $pl['name'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( (string) ( $pl['version'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( demo_bool_de( ! empty( $pl['active'] ) ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><code><?php echo htmlspecialchars( (string) ( $pl['slug'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td>
+									<td><?php echo htmlspecialchars( demo_bool_de( ! empty( $pl['update_available'] ) ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( demo_bool_de( ! empty( $pl['is_mu'] ) ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( demo_bool_de( ! empty( $pl['is_network'] ) ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( (string) ( $pl['requires_php'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( (string) ( $pl['requires_wp'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+								</tr>
+							<?php endforeach; ?>
+						</tbody>
+					</table>
+				</div>
+			<?php endif; ?>
+
+			<?php if ( ! empty( $json['list_themes'] ) && is_array( $json['list_themes'] ) ) : ?>
+				<div class="table-wrap">
+					<table>
+						<caption>Themes (<code>list_themes</code>)</caption>
+						<thead>
+							<tr>
+								<th scope="col">Name</th>
+								<th scope="col">Version</th>
+								<th scope="col">aktiv</th>
+								<th scope="col">Child</th>
+								<th scope="col">Parent (Stylesheet)</th>
+								<th scope="col">Parent-Version</th>
+							</tr>
+						</thead>
+						<tbody>
+							<?php foreach ( $json['list_themes'] as $th ) : ?>
+								<?php if ( ! is_array( $th ) ) { continue; } ?>
+								<tr>
+									<td class="name"><?php echo htmlspecialchars( (string) ( $th['name'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( (string) ( $th['version'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( demo_bool_de( ! empty( $th['active'] ) ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><?php echo htmlspecialchars( demo_bool_de( ! empty( $th['is_child'] ) ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+									<td><code><?php echo htmlspecialchars( (string) ( $th['parent'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td>
+									<td><?php echo htmlspecialchars( (string) ( $th['parent_version'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
+								</tr>
+							<?php endforeach; ?>
+						</tbody>
+					</table>
+				</div>
+			<?php endif; ?>
+
+			<?php
+			$json_for_pre = $json;
+			unset( $json_for_pre['list_plugins'], $json_for_pre['list_themes'] );
+			?>
+			<p class="note">Weitere Felder (JSON ohne Plugin-/Themenlisten):</p>
+			<pre><?php echo htmlspecialchars( json_encode( $json_for_pre, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
 		<?php else : ?>
 			<pre><?php echo htmlspecialchars( $info_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
 		<?php endif; ?>

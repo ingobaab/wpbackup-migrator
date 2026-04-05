@@ -2,6 +2,8 @@
 /**
  * Minimaler Democlient (PHP 8.2+, prozedural): REST /info nach Application-Password-Auth.
  *
+ * Die JSON-Antwort enthält u. a. database_size und media_size (geschätzte Mediathek, siehe docs/rest-api.md).
+ *
  * Voraussetzung: Auf https://maschenmarie.de ist WPBackup Migrator aktiv.
  * Der Migration Key kann per Redirect (?migration_key=…) kommen (z. B. von wpbackup.org);
  * er wird hier nur angezeigt – der /info-Endpunkt liefert den Key ohnehin nach erfolgreicher Auth.
@@ -89,6 +91,23 @@ function demo_http_get_basic( string $url, string $user, string $app_pw ): array
 	];
 }
 
+/**
+ * Bytezahl für Anzeige (Web-Demo).
+ */
+function demo_info_format_bytes( int $bytes ): string {
+	if ( $bytes < 0 ) {
+		$bytes = 0;
+	}
+	$units = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
+	$n       = (float) $bytes;
+	$u       = 0;
+	while ( $n >= 1024.0 && $u < count( $units ) - 1 ) {
+		$n /= 1024.0;
+		++$u;
+	}
+	return sprintf( '%.2f %s', $n, $units[ $u ] );
+}
+
 // --- CLI ---
 if ( php_sapi_name() === 'cli' ) {
 	$user = $default_user;
@@ -104,6 +123,11 @@ if ( php_sapi_name() === 'cli' ) {
 		fwrite( STDERR, $resp['error'] . "\n" );
 		exit( 1 );
 	}
+	$data = json_decode( $resp['body'], true );
+	if ( is_array( $data ) && isset( $data['media_size'] ) && is_numeric( $data['media_size'] ) ) {
+		$ms = (int) $data['media_size'];
+		echo "media_size: {$ms} bytes (" . demo_info_format_bytes( $ms ) . ", geschätzt)\n";
+	}
 	echo $resp['body'] . "\n";
 	exit( $resp['ok'] ? 0 : 1 );
 }
@@ -112,6 +136,7 @@ if ( php_sapi_name() === 'cli' ) {
 header( 'Content-Type: text/html; charset=utf-8' );
 echo '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>WPBackup Migrator – Info-Demo</title></head><body>';
 echo '<h1>WPBackup Migrator – /info Demo</h1>';
+echo '<p class="note" style="font-size:0.95rem;color:#50575e">Antwortfelder u. a. <code>database_size</code>, <code>media_size</code> (Mediathek-Schätzung aus der DB, siehe <code>docs/rest-api.md</code> im Plugin).</p>';
 
 if ( $migration_key_from_redirect !== '' ) {
 	echo '<p><strong>migration_key</strong> aus Redirect (Query): <code>' . htmlspecialchars( $migration_key_from_redirect, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</code></p>';
@@ -133,6 +158,10 @@ if ( $resp['error'] !== '' ) {
 } else {
 	$json = json_decode( $resp['body'], true );
 	if ( is_array( $json ) ) {
+		if ( isset( $json['media_size'] ) && is_numeric( $json['media_size'] ) ) {
+			$ms = (int) $json['media_size'];
+			echo '<p><strong>media_size:</strong> <code>' . (int) $ms . '</code> Bytes (≈ ' . htmlspecialchars( demo_info_format_bytes( $ms ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . ')</p>';
+		}
 		echo '<pre>' . htmlspecialchars( json_encode( $json, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</pre>';
 	} else {
 		echo '<pre>' . htmlspecialchars( $resp['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</pre>';

@@ -23,6 +23,8 @@ Backup and migration tooling for WordPress sites (REST API, migration key, optio
 
 Siehe Plugin-URI https://wpbackup.org für die aktuelle Dokumentation.
 
+Technische Übersicht der REST-Endpunkte (u. a. /info, media_size): `docs/rest-api.md` im Plugin-Verzeichnis.
+
 == Changelog ==
 
 = 1.3.0 =
