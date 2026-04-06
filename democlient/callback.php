@@ -18,8 +18,9 @@ if ( session_status() === PHP_SESSION_NONE ) {
 
 // --- Konfiguration ---
 const DEMO_DEFAULT_SITE = 'https://maschenmarie.de';
-const REST_INFO_PATH    = '/wp-json/wpbackup-migrator/v1/info';
-const APP_NAME          = 'WPBackup Migrator';
+const REST_INFO_PATH             = '/wp-json/wpbackup-migrator/v1/info';
+const REST_FILESYSTEM_SCAN_PATH  = '/wp-json/wpbackup-migrator/v1/filesystem-scan';
+const APP_NAME                   = 'WPBackup Migrator';
 
 // -----------------------------------------------------------------------------
 // Hilfsfunktionen
@@ -303,6 +304,127 @@ function demo_bool_de( bool $v ): string {
 	return $v ? 'ja' : 'nein';
 }
 
+/**
+ * GET mit Header X-WPBackup-Key (filesystem-scan u. ä.).
+ *
+ * @return array{ok: bool, status: int, body: string, error: string}
+ */
+function demo_http_get_migration_key( string $url, string $migration_key ): array {
+	$key = preg_replace( '/[\r\n\x00]/', '', trim( $migration_key ) );
+	if ( $key === '' ) {
+		return [
+			'ok'     => false,
+			'status' => 0,
+			'body'   => '',
+			'error'  => 'Migration Key fehlt.',
+		];
+	}
+
+	$ctx = stream_context_create(
+		[
+			'http' => [
+				'method'        => 'GET',
+				'header'        => "Accept: application/json\r\nX-WPBackup-Key: {$key}\r\n",
+				'timeout'       => 60,
+				'ignore_errors' => true,
+			],
+			'ssl'  => [
+				'verify_peer'      => true,
+				'verify_peer_name' => true,
+			],
+		]
+	);
+
+	$body = @file_get_contents( $url, false, $ctx );
+	if ( $body === false ) {
+		return [
+			'ok'     => false,
+			'status' => 0,
+			'body'   => '',
+			'error'  => 'Request fehlgeschlagen (file_get_contents).',
+		];
+	}
+
+	$status = 0;
+	if ( isset( $http_response_header ) && is_array( $http_response_header ) ) {
+		foreach ( $http_response_header as $line ) {
+			if ( preg_match( '#^HTTP/\S+\s+(\d+)#', $line, $m ) ) {
+				$status = (int) $m[1];
+				break;
+			}
+		}
+	}
+
+	return [
+		'ok'     => $status >= 200 && $status < 300,
+		'status' => $status,
+		'body'   => $body,
+		'error'  => '',
+	];
+}
+
+/**
+ * @param list<array<string, mixed>> $entries API-Feld "entries"
+ * @return array<string, array{meta: ?array, children: array}>
+ */
+function demo_fs_entries_to_nested_tree( array $entries ): array {
+	$root = [];
+	foreach ( $entries as $e ) {
+		if ( ! is_array( $e ) || ! isset( $e['relative_path'] ) ) {
+			continue;
+		}
+		$parts = array_values(
+			array_filter(
+				explode( '/', str_replace( '\\', '/', (string) $e['relative_path'] ) ),
+				'strlen'
+			)
+		);
+		$ref = &$root;
+		foreach ( $parts as $pi => $seg ) {
+			if ( ! isset( $ref[ $seg ] ) ) {
+				$ref[ $seg ] = [
+					'meta'     => null,
+					'children' => [],
+				];
+			}
+			if ( $pi === count( $parts ) - 1 ) {
+				$ref[ $seg ]['meta'] = $e;
+			}
+			$ref = &$ref[ $seg ]['children'];
+		}
+	}
+	return $root;
+}
+
+/**
+ * @param array<string, array{meta: ?array, children: array}> $nodes
+ */
+function demo_fs_render_tree_html( array $nodes ): string {
+	if ( $nodes === [] ) {
+		return '';
+	}
+	ksort( $nodes, SORT_NATURAL | SORT_FLAG_CASE );
+	$html = '<ul class="fs-tree">';
+	foreach ( $nodes as $name => $data ) {
+		$meta     = is_array( $data['meta'] ?? null ) ? $data['meta'] : null;
+		$children = is_array( $data['children'] ?? null ) ? $data['children'] : [];
+		$type     = is_array( $meta ) ? (string) ( $meta['type'] ?? '?' ) : '?';
+		$extra    = '';
+		if ( is_array( $meta ) && isset( $meta['size'] ) && $meta['size'] !== null ) {
+			$extra = ' · ' . (int) $meta['size'] . ' B';
+		}
+		$html .= '<li><span class="fs-node"><strong>' . htmlspecialchars( (string) $name, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</strong> ';
+		$html .= '<span class="fs-meta">(' . htmlspecialchars( $type, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . htmlspecialchars( $extra, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . ')</span></span>';
+		if ( $children !== [] ) {
+			$html .= demo_fs_render_tree_html( $children );
+		}
+		$html .= '</li>';
+	}
+	$html .= '</ul>';
+
+	return $html;
+}
+
 // -----------------------------------------------------------------------------
 // Eingaben
 // -----------------------------------------------------------------------------
@@ -314,6 +436,14 @@ $has_wp_app_redirect = isset( $_GET['user_login'], $_GET['password'] )
 $form_site = DEMO_DEFAULT_SITE;
 if ( isset( $_GET['wpbackup_demo_site'] ) && is_string( $_GET['wpbackup_demo_site'] ) ) {
 	$normalized = demo_normalize_site_base( (string) $_GET['wpbackup_demo_site'] );
+	if ( $normalized !== '' ) {
+		$form_site = $normalized;
+	}
+}
+if ( $_SERVER['REQUEST_METHOD'] === 'POST'
+	&& isset( $_POST['demo_filesystem_scan'], $_POST['wpbackup_demo_site'] )
+	&& is_string( $_POST['wpbackup_demo_site'] ) ) {
+	$normalized = demo_normalize_site_base( (string) $_POST['wpbackup_demo_site'] );
 	if ( $normalized !== '' ) {
 		$form_site = $normalized;
 	}
@@ -361,6 +491,63 @@ if ( $has_wp_app_redirect ) {
 	if ( $wp_base_for_info !== '' ) {
 		$info_url    = rtrim( $wp_base_for_info, '/' ) . REST_INFO_PATH;
 		$info_result = demo_http_get_basic( $info_url, $u, $p );
+	}
+}
+
+if ( $info_result !== null && $info_result['ok'] && $info_result['error'] === '' ) {
+	$info_json = json_decode( $info_result['body'], true );
+	if ( is_array( $info_json ) && isset( $info_json['key'] ) && is_string( $info_json['key'] ) && $info_json['key'] !== '' ) {
+		$_SESSION['wpbackup_demo_migration_key']      = $info_json['key'];
+		$_SESSION['wpbackup_demo_migration_key_site'] = $wp_base_for_info;
+	}
+}
+
+$fs_form_path             = 'uploads';
+$fs_form_depth            = 2;
+$fs_scan_result           = null;
+$fs_scan_duration_seconds = null;
+$fs_migration_override = isset( $_POST['migration_key_override'] ) && is_string( $_POST['migration_key_override'] )
+	? (string) $_POST['migration_key_override'] : '';
+
+if ( $_SERVER['REQUEST_METHOD'] === 'POST' && isset( $_POST['demo_filesystem_scan'] ) ) {
+	$fs_form_path = isset( $_POST['filesystem_scan_path'] ) ? trim( (string) $_POST['filesystem_scan_path'] ) : 'uploads';
+	if ( $fs_form_path === '' ) {
+		$fs_form_path = 'uploads';
+	}
+	$fs_form_depth = isset( $_POST['filesystem_scan_max_depth'] ) ? max( 0, min( 50, (int) $_POST['filesystem_scan_max_depth'] ) ) : 2;
+
+	$mkey = '';
+	if ( trim( $fs_migration_override ) !== '' ) {
+		$mkey = trim( $fs_migration_override );
+	} elseif (
+		isset( $_SESSION['wpbackup_demo_migration_key'], $_SESSION['wpbackup_demo_migration_key_site'] )
+		&& is_string( $_SESSION['wpbackup_demo_migration_key'] )
+		&& is_string( $_SESSION['wpbackup_demo_migration_key_site'] )
+		&& $_SESSION['wpbackup_demo_migration_key_site'] === $wp_base_for_info
+	) {
+		$mkey = $_SESSION['wpbackup_demo_migration_key'];
+	}
+
+	if ( $wp_base_for_info !== '' && $mkey !== '' ) {
+		$fs_url = rtrim( $wp_base_for_info, '/' ) . REST_FILESYSTEM_SCAN_PATH . '?' . http_build_query(
+			[
+				'path'      => $fs_form_path,
+				'max_depth' => $fs_form_depth,
+			],
+			'',
+			'&',
+			PHP_QUERY_RFC3986
+		);
+		$t0                       = microtime( true );
+		$fs_scan_result           = demo_http_get_migration_key( $fs_url, $mkey );
+		$fs_scan_duration_seconds = microtime( true ) - $t0;
+	} else {
+		$fs_scan_result = [
+			'ok'     => false,
+			'status' => 0,
+			'body'   => '',
+			'error'  => 'WordPress-Basis-URL oder Migration Key fehlt (nach /info in Session oder manuell eintragen).',
+		];
 	}
 }
 
@@ -417,6 +604,11 @@ header( 'Content-Type: text/html; charset=utf-8' );
 		.table-wrap table { font-size: 0.82rem; }
 		.table-wrap caption { text-align: left; font-weight: 700; margin-bottom: 0.35rem; }
 		.table-wrap td.name { white-space: normal; max-width: 16rem; }
+		.fs-tree { list-style: none; margin: 0.2rem 0 0.2rem 1rem; padding: 0; }
+		.fs-tree .fs-tree { margin-left: 0.85rem; border-left: 1px solid #dcdcde; padding-left: 0.5rem; }
+		.fs-tree li { margin: 0.2rem 0; }
+		.fs-meta { color: #50575e; font-size: 0.88rem; font-weight: normal; }
+		#fs-tree-output { margin-top: 0.75rem; padding: 0.75rem; background: #f6f7f7; border: 1px solid #dcdcde; border-radius: 4px; overflow: auto; max-height: 28rem; }
 	</style>
 </head>
 <body>
@@ -644,6 +836,70 @@ header( 'Content-Type: text/html; charset=utf-8' );
 	<?php endif; ?>
 <?php elseif ( isset( $_GET['migration_key'] ) && ! $has_wp_app_redirect ) : ?>
 	<p class="note">Keine <code>user_login</code>/<code>password</code>-Parameter – /info wird nicht abgefragt (nur <code>migration_key</code>-Test).</p>
+<?php endif; ?>
+
+<h2>6) REST API <code>GET …/v1/filesystem-scan</code> (Migration Key)</h2>
+<p class="note">
+	Listet Dateien/Ordner unter <code>wp-content</code> (relativer <code>path</code>, <code>max_depth</code>). Authentifizierung: Header <code>X-WPBackup-Key</code>.
+	Nach erfolgreichem Abschnitt 5 wird der Key aus der <code>/info</code>-Antwort in der Session gespeichert; alternativ unten manuell eintragen.
+</p>
+<form method="post" action="" id="demo-filesystem-scan-form">
+	<input type="hidden" name="wpbackup_demo_site" value="<?php echo htmlspecialchars( $form_site, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>">
+	<input type="hidden" name="demo_filesystem_scan" value="1">
+	<div class="row">
+		<label for="filesystem_scan_path">Pfad unter <code>wp-content</code> (<code>filesystem-scan-path</code>)</label>
+		<input type="text" id="filesystem_scan_path" name="filesystem_scan_path" value="<?php echo htmlspecialchars( $fs_form_path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>" placeholder="uploads oder .">
+	</div>
+	<div class="row">
+		<label for="filesystem_scan_max_depth"><code>max_depth</code></label>
+		<input type="number" id="filesystem_scan_max_depth" name="filesystem_scan_max_depth" value="<?php echo (int) $fs_form_depth; ?>" min="0" max="50" step="1">
+	</div>
+	<div class="row">
+		<label for="migration_key_override">Migration Key (optional, falls nicht aus /info-Session)</label>
+		<input type="password" id="migration_key_override" name="migration_key_override" value="" autocomplete="off" placeholder="Leer = Session nach Abschnitt 5">
+	</div>
+	<button type="submit" class="secondary">filesystem-scan ausführen</button>
+</form>
+
+<?php if ( $fs_scan_result !== null ) : ?>
+	<p>HTTP-Status: <strong><?php echo (int) $fs_scan_result['status']; ?></strong>
+		<?php if ( $fs_scan_duration_seconds !== null ) : ?>
+			· Abfrage-Dauer: <strong><?php echo htmlspecialchars( number_format( $fs_scan_duration_seconds, 3, ',', '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?> s</strong>
+		<?php endif; ?>
+		<?php if ( $fs_scan_result['error'] !== '' ) : ?>
+			<span class="bad"><?php echo htmlspecialchars( $fs_scan_result['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></span>
+		<?php endif; ?>
+	</p>
+	<?php if ( $fs_scan_result['error'] === '' && $fs_scan_result['ok'] ) : ?>
+		<?php
+		$fs_json = json_decode( $fs_scan_result['body'], true );
+		?>
+		<?php if ( is_array( $fs_json ) && isset( $fs_json['entries'] ) && is_array( $fs_json['entries'] ) ) : ?>
+			<?php
+			$nested = demo_fs_entries_to_nested_tree( $fs_json['entries'] );
+			?>
+			<p class="note">
+				<code><?php echo htmlspecialchars( rtrim( $wp_base_for_info, '/' ) . REST_FILESYSTEM_SCAN_PATH, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code>
+				· Einträge: <?php echo isset( $fs_json['entry_count'] ) ? (int) $fs_json['entry_count'] : count( $fs_json['entries'] ); ?>
+				<?php if ( ! empty( $fs_json['truncated'] ) ) : ?>
+					· <strong>gekürzt</strong> (Limit)
+				<?php endif; ?>
+				· Bytes (Dateien): <?php echo isset( $fs_json['total_bytes'] ) ? (int) $fs_json['total_bytes'] : 0; ?>
+			</p>
+			<div id="fs-tree-output">
+				<?php if ( $nested === [] ) : ?>
+					<p class="note">Keine Einträge (leeres Verzeichnis oder Filter).</p>
+				<?php else : ?>
+					<?php echo demo_fs_render_tree_html( $nested ); ?>
+				<?php endif; ?>
+			</div>
+		<?php else : ?>
+			<pre><?php echo htmlspecialchars( $fs_scan_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
+		<?php endif; ?>
+	<?php elseif ( $fs_scan_result['error'] === '' && ! $fs_scan_result['ok'] ) : ?>
+		<p class="bad">Anfrage fehlgeschlagen (HTTP <?php echo (int) $fs_scan_result['status']; ?>).</p>
+		<pre><?php echo htmlspecialchars( $fs_scan_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
+	<?php endif; ?>
 <?php endif; ?>
 
 <h2>Hinweise (Auto-Install &amp; Demo)</h2>

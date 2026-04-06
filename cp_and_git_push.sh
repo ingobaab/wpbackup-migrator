@@ -1,6 +1,7 @@
- cp -rv . ~/wpbackup-migrator/
+ #cp -rv . ~/wpbackup-migrator/
+ rsync -avz . ~/wpbackup-migrator/
  cd ~/wpbackup-migrator/
  git add .
- git commit -m "improved rest api check in callback.php"
+ git commit -m "implemented filesystem-can"
  git push
  cd -

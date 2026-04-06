@@ -74,10 +74,48 @@ Prüft den Migration Key (Body-Parameter `key`).
 
 ---
 
-## Weitere Routen
+## `GET /filesystem-scan`
 
-Datenbank- und Datei-Routen sind unter demselben Namespace registriert (siehe `includes/Api/Database.php`, `includes/Api/Files.php`); ggf. Migration Key per Header `X-WPBackup-Key` (oder Legacy `X-FlyWP-Key`).
+Liefert eine **flache Liste** von Dateien und Verzeichnissen unter einem Startpfad **innerhalb von `wp-content`** (kein Download, nur Metadaten).
+
+**Authentifizierung:** Migration Key (`X-WPBackup-Key` / `X-FlyWP-Key` oder Query `secret`) – wie bei den übrigen geschützten Datei-/DB-Routen.
+
+**Query-Parameter:**
+
+| Parameter | Typ | Pflicht | Beschreibung |
+|-----------|-----|---------|--------------|
+| `path` | string | nein | Relativer Pfad **unterhalb von `wp-content`** (POSIX-Slash). Beispiele: `uploads`, `plugins/meplugin`, `.` = gesamtes `wp-content`. Kein `..`, keine absoluten Pfade. |
+| `max_depth` | integer | nein | Maximale **Verzeichnistiefe** relativ zum Startpfad: `0` = nur direkte Kinder des Startordners (kein Abstieg in Unterordner), `1` = eine Ebene tiefer, usw. Serverseitig nach oben begrenzt (siehe Antwort `max_depth_effective`). |
+
+**Sicherheit:** Der aufgelöste Pfad wird per `realpath` gegen **`WP_CONTENT_DIR`** geprüft; alles außerhalb von `wp-content` wird abgelehnt.
+
+**Antwort (JSON, Auszug):**
+
+| Feld | Typ | Bedeutung |
+|------|-----|-----------|
+| `success` | bool | `true` bei Erfolg |
+| `wp_content` | string | Normalisierter Basis-Pfad (`WP_CONTENT_DIR`) |
+| `path_requested` | string | Wie übergeben |
+| `path_resolved` | string | Absoluter, geprüfter Scan-Start |
+| `max_depth` | int | Angeforderter Wert |
+| `max_depth_effective` | int | Nach Cap verwendeter Wert |
+| `entry_count` | int | Anzahl Einträge in `entries` |
+| `truncated` | bool | `true`, wenn die Eintrags-Obergrenze erreicht wurde |
+| `total_bytes` | int | Summe der Dateigrößen (nur Dateien; Verzeichnisse zählen nicht) |
+| `entries` | array | Liste von `{ "relative_path", "type": "file"\|"dir", "size": int\|null, "depth": int }` |
+
+**Fehler:** HTTP 4xx/5xx mit `WP_Error`-Body (z. B. ungültiger Pfad, Ziel nicht lesbar).
+
+**Hinweis:** Große Bäume können speicherintensiv sein; es gibt eine serverseitige Obergrenze für die Anzahl Einträge (Abbruch mit `truncated: true`).
 
 ---
 
-*Version der API-Inhalte richtet sich nach der Plugin-Version; bei Abweichungen gilt der Code in `includes/Api.php`.*
+## Weitere Routen
+
+Datenbank-Routen: `includes/Api/Database.php`.  
+Weitere Datei-Routen (Zip-Downloads usw.): `includes/Api/Files.php`.  
+Überall dort, wo `Api::check_permission` genutzt wird: Migration Key per Header `X-WPBackup-Key` (oder Legacy `X-FlyWP-Key`) bzw. Query `secret`.
+
+---
+
+*Version der API-Inhalte richtet sich nach der Plugin-Version; bei Abweichungen gilt der Code in `includes/`.*

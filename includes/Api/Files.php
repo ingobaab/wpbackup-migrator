@@ -40,6 +40,21 @@ class Files {
     ];
 
     /**
+     * GET /filesystem-scan: defaults and safety caps.
+     */
+    const FILESYSTEM_SCAN_DEFAULT_MAX_DEPTH = 10;
+
+    /**
+     * Hard upper bound for max_depth (request is clamped).
+     */
+    const FILESYSTEM_SCAN_MAX_DEPTH_CAP = 50;
+
+    /**
+     * Stop listing after this many entries (files + dirs) to limit memory/time.
+     */
+    const FILESYSTEM_SCAN_MAX_ENTRIES = 100000;
+
+    /**
      * Constructor
      */
     public function __construct() {
@@ -86,6 +101,220 @@ class Files {
             'callback'            => [$this, 'download_themes'],
             'permission_callback' => [Api::class, 'check_permission'],
         ] );
+
+        register_rest_route(
+            $namespace,
+            '/filesystem-scan',
+            [
+                'methods'             => WP_REST_Server::READABLE,
+                'callback'            => [ $this, 'filesystem_scan' ],
+                'permission_callback' => [ Api::class, 'check_permission' ],
+                'args'                => [
+                    'path'      => [
+                        'description' => __( 'Relative path under wp-content (e.g. uploads, .)', 'wpbackup-migrator' ),
+                        'type'        => 'string',
+                        'default'     => '.',
+                    ],
+                    'max_depth' => [
+                        'description' => __( 'Maximum directory depth below the start path (0 = immediate children only)', 'wpbackup-migrator' ),
+                        'type'        => 'integer',
+                        'default'     => self::FILESYSTEM_SCAN_DEFAULT_MAX_DEPTH,
+                    ],
+                ],
+            ]
+        );
+    }
+
+    /**
+     * GET /filesystem-scan — list files and directories under wp-content with depth limit.
+     *
+     * @param WP_REST_Request $request Request.
+     * @return \WP_REST_Response|\WP_Error
+     */
+    public function filesystem_scan( WP_REST_Request $request ) {
+        $resolved = $this->resolve_scan_path_under_wp_content( $request->get_param( 'path' ) );
+        if ( is_wp_error( $resolved ) ) {
+            return $resolved;
+        }
+
+        $max_requested = (int) $request->get_param( 'max_depth' );
+        if ( $max_requested < 0 ) {
+            $max_requested = 0;
+        }
+        $max_effective = min( $max_requested, self::FILESYSTEM_SCAN_MAX_DEPTH_CAP );
+
+        $result = $this->collect_filesystem_entries_limited( $resolved, $max_effective );
+
+        return rest_ensure_response(
+            [
+                'success'              => true,
+                'wp_content'           => wp_normalize_path( WP_CONTENT_DIR ),
+                'path_requested'       => (string) $request->get_param( 'path' ),
+                'path_resolved'        => $resolved,
+                'max_depth'            => $max_requested,
+                'max_depth_effective'  => $max_effective,
+                'entry_count'          => $result['entry_count'],
+                'truncated'            => $result['truncated'],
+                'total_bytes'          => $result['total_bytes'],
+                'entries'              => $result['entries'],
+            ]
+        );
+    }
+
+    /**
+     * Resolve a path parameter to an absolute directory under WP_CONTENT_DIR.
+     *
+     * @param mixed $path_param Query/body value (e.g. "uploads", ".", "plugins/foo").
+     * @return string|\WP_Error Absolute normalized directory path.
+     */
+    private function resolve_scan_path_under_wp_content( $path_param ) {
+        $content = wp_normalize_path( WP_CONTENT_DIR );
+        $raw     = is_string( $path_param ) ? trim( $path_param ) : '';
+
+        if ( $raw === '' || $raw === '.' ) {
+            $candidate = $content;
+        } else {
+            $raw       = str_replace( '\\', '/', $raw );
+            $raw       = trim( $raw, '/' );
+            $segments  = explode( '/', $raw );
+            $clean     = [];
+            foreach ( $segments as $seg ) {
+                if ( $seg === '' || $seg === '.' ) {
+                    continue;
+                }
+                if ( $seg === '..' ) {
+                    return new WP_Error(
+                        'invalid_path',
+                        __( 'Path traversal (..) is not allowed', 'wpbackup-migrator' ),
+                        [ 'status' => 400 ]
+                    );
+                }
+                $clean[] = $seg;
+            }
+            $candidate = $content . ( ! empty( $clean ) ? '/' . implode( '/', $clean ) : '' );
+        }
+
+        $candidate = wp_normalize_path( $candidate );
+        $real      = realpath( $candidate );
+        if ( false === $real ) {
+            return new WP_Error(
+                'path_not_found',
+                __( 'Path does not exist or is not accessible', 'wpbackup-migrator' ),
+                [ 'status' => 404 ]
+            );
+        }
+
+        $real = wp_normalize_path( $real );
+        $base = realpath( $content );
+        if ( false === $base ) {
+            return new WP_Error(
+                'internal_error',
+                __( 'Could not resolve wp-content directory', 'wpbackup-migrator' ),
+                [ 'status' => 500 ]
+            );
+        }
+        $base = wp_normalize_path( $base );
+
+        if ( $real !== $base && strpos( $real, $base . '/' ) !== 0 ) {
+            return new WP_Error(
+                'invalid_path',
+                __( 'Path must be inside wp-content', 'wpbackup-migrator' ),
+                [ 'status' => 400 ]
+            );
+        }
+
+        if ( ! is_dir( $real ) || ! is_readable( $real ) ) {
+            return new WP_Error(
+                'path_not_readable',
+                __( 'Path is not a readable directory', 'wpbackup-migrator' ),
+                [ 'status' => 403 ]
+            );
+        }
+
+        return $real;
+    }
+
+    /**
+     * Walk directory tree with max depth and entry cap.
+     *
+     * @param string $scan_root Absolute normalized directory.
+     * @param int    $max_depth Maximum depth (0 = only immediate children).
+     * @return array{entries: list<array<string, mixed>>, entry_count: int, truncated: bool, total_bytes: int}
+     */
+    private function collect_filesystem_entries_limited( $scan_root, $max_depth ) {
+        $scan_root   = wp_normalize_path( $scan_root );
+        $entries     = [];
+        $truncated   = false;
+        $total_bytes = 0;
+
+        $walker = null;
+        $walker = function ( $dir, $depth_rel ) use ( &$walker, &$entries, &$truncated, &$total_bytes, $scan_root, $max_depth ) {
+            if ( $truncated ) {
+                return;
+            }
+            if ( $depth_rel > $max_depth ) {
+                return;
+            }
+
+            $list = @scandir( $dir );
+            if ( false === $list ) {
+                return;
+            }
+
+            foreach ( $list as $name ) {
+                if ( '.' === $name || '..' === $name ) {
+                    continue;
+                }
+                if ( count( $entries ) >= self::FILESYSTEM_SCAN_MAX_ENTRIES ) {
+                    $truncated = true;
+                    return;
+                }
+
+                $full = $dir . '/' . $name;
+                $full = wp_normalize_path( $full );
+                $rel  = ltrim( str_replace( $scan_root, '', $full ), '/' );
+
+                if ( is_dir( $full ) ) {
+                    $entries[] = [
+                        'relative_path' => $rel,
+                        'type'          => 'dir',
+                        'size'          => null,
+                        'depth'         => $depth_rel,
+                    ];
+                    if ( $depth_rel < $max_depth ) {
+                        $walker( $full, $depth_rel + 1 );
+                    }
+                } elseif ( is_file( $full ) ) {
+                    $sz = @filesize( $full );
+                    if ( false === $sz ) {
+                        $sz = 0;
+                    }
+                    $total_bytes += (int) $sz;
+                    $entries[]    = [
+                        'relative_path' => $rel,
+                        'type'          => 'file',
+                        'size'          => (int) $sz,
+                        'depth'         => $depth_rel,
+                    ];
+                }
+            }
+        };
+
+        $walker( $scan_root, 0 );
+
+        usort(
+            $entries,
+            static function ( $a, $b ) {
+                return strcmp( (string) $a['relative_path'], (string) $b['relative_path'] );
+            }
+        );
+
+        return [
+            'entries'     => $entries,
+            'entry_count' => count( $entries ),
+            'truncated'   => $truncated,
+            'total_bytes'   => $total_bytes,
+        ];
     }
 
     /**
