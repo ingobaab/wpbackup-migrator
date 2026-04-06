@@ -44,6 +44,13 @@ class Api {
 	private $files;
 
 	/**
+	 * Cached result of SHOW TABLE STATUS for the active WP prefix.
+	 *
+	 * @var array<int, object>|null
+	 */
+	private $table_status_cache = null;
+
+	/**
 	 * Constructor
 	 */
 	public function __construct() {
@@ -135,6 +142,8 @@ class Api {
 	private function get_site_info_payload( $admin ) {
 		global $wpdb;
 
+		$database_info = $this->get_database_info_for_info();
+
 		return [
 			'success'               => true,
 			'username'              => $admin->user_login,
@@ -146,11 +155,59 @@ class Api {
 			'prefix'                => $wpdb->prefix,
 			'php_version'           => PHP_VERSION,
 			'wp_version'            => get_bloginfo( 'version' ),
-			'database_size'         => $this->get_database_size(),
+			'database_size'         => $database_info['total_data_bytes'],
+			'database_info'         => $database_info,
 			'media_size'            => $this->estimate_media_library_size_bytes(),
 			'list_plugins'          => $this->get_list_plugins_for_info(),
 			'list_themes'           => $this->get_list_themes_for_info(),
 			'is_wp_cron_disabled'   => defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON === true,
+		];
+	}
+
+	/**
+	 * Übersicht der DB-Tabellen für /info.
+	 *
+	 * @return array{
+	 *   table_count:int,
+	 *   total_data_bytes:int,
+	 *   total_index_bytes:int,
+	 *   total_bytes:int,
+	 *   tables:list<array{name:string, records:int, data_bytes:int, index_bytes:int, total_bytes:int}>
+	 * }
+	 */
+	private function get_database_info_for_info() {
+		$tables_meta = $this->get_database_table_status();
+		$tables      = [];
+		$total_data  = 0;
+		$total_index = 0;
+		$total_all   = 0;
+
+		foreach ( $tables_meta as $table ) {
+			$name       = isset( $table->Name ) ? (string) $table->Name : '';
+			$rows       = isset( $table->Rows ) ? max( 0, (int) $table->Rows ) : 0;
+			$data_bytes = isset( $table->Data_length ) ? max( 0, (int) $table->Data_length ) : 0;
+			$idx_bytes  = isset( $table->Index_length ) ? max( 0, (int) $table->Index_length ) : 0;
+			$sum_bytes  = $data_bytes + $idx_bytes;
+
+			$total_data  += $data_bytes;
+			$total_index += $idx_bytes;
+			$total_all   += $sum_bytes;
+
+			$tables[] = [
+				'name'        => $name,
+				'records'     => $rows,
+				'data_bytes'  => $data_bytes,
+				'index_bytes' => $idx_bytes,
+				'total_bytes' => $sum_bytes,
+			];
+		}
+
+		return [
+			'table_count'        => count( $tables ),
+			'total_data_bytes'   => min( $total_data, PHP_INT_MAX ),
+			'total_index_bytes'  => min( $total_index, PHP_INT_MAX ),
+			'total_bytes'        => min( $total_all, PHP_INT_MAX ),
+			'tables'             => $tables,
 		];
 	}
 
@@ -421,27 +478,37 @@ class Api {
 	 * @return int Total database size in bytes
 	 */
 	private function get_database_size() {
+		$tables = $this->get_database_table_status();
+		$size   = 0;
+		foreach ( $tables as $table ) {
+			$size += isset( $table->Data_length ) ? max( 0, (int) $table->Data_length ) : 0;
+		}
+		return min( $size, PHP_INT_MAX );
+	}
+
+	/**
+	 * Lädt Tabellenstatus für das aktuelle WP-Tabellenpräfix (einmalig pro Request).
+	 *
+	 * SHOW TABLE STATUS nutzt DB-Metadaten und ist i. d. R. deutlich schneller als COUNT(*) über alle Tabellen.
+	 *
+	 * @return array<int, object>
+	 */
+	private function get_database_table_status() {
 		global $wpdb;
 
-		$size = 0;
+		if ( is_array( $this->table_status_cache ) ) {
+			return $this->table_status_cache;
+		}
 
-		// Get all tables with the site's prefix
-		$tables = $wpdb->get_results(
+		$rows = $wpdb->get_results(
 			$wpdb->prepare(
 				'SHOW TABLE STATUS LIKE %s',
 				$wpdb->esc_like( $wpdb->prefix ) . '%'
 			)
 		);
 
-		if ( $tables ) {
-			foreach ( $tables as $table ) {
-				// Only count Data_length, not Index_length
-				// Indexes are not exported in SQL dumps (they're rebuilt on import)
-				$size += $table->Data_length;
-			}
-		}
-
-		return $size;
+		$this->table_status_cache = is_array( $rows ) ? $rows : [];
+		return $this->table_status_cache;
 	}
 
 	/**

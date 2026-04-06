@@ -425,6 +425,112 @@ function demo_fs_render_tree_html( array $nodes ): string {
 	return $html;
 }
 
+/**
+ * Filesystem-Scan ausführen und HTML-Fragmente für JSON/AJAX-Antwort erzeugen.
+ *
+ * @return array{
+ *   ok: bool,
+ *   status: int,
+ *   body: string,
+ *   error: string,
+ *   duration_seconds: float|null,
+ *   html_meta: string,
+ *   html_body: string
+ * }
+ */
+function demo_filesystem_scan_response_fragments(
+	string $wp_base_for_info,
+	string $fs_form_path,
+	int $fs_form_depth,
+	string $fs_migration_override
+): array {
+	$mkey = '';
+	if ( trim( $fs_migration_override ) !== '' ) {
+		$mkey = trim( $fs_migration_override );
+	} elseif (
+		isset( $_SESSION['wpbackup_demo_migration_key'], $_SESSION['wpbackup_demo_migration_key_site'] )
+		&& is_string( $_SESSION['wpbackup_demo_migration_key'] )
+		&& is_string( $_SESSION['wpbackup_demo_migration_key_site'] )
+		&& $_SESSION['wpbackup_demo_migration_key_site'] === $wp_base_for_info
+	) {
+		$mkey = $_SESSION['wpbackup_demo_migration_key'];
+	}
+
+	$duration_seconds = null;
+	if ( $wp_base_for_info !== '' && $mkey !== '' ) {
+		$fs_url = rtrim( $wp_base_for_info, '/' ) . REST_FILESYSTEM_SCAN_PATH . '?' . http_build_query(
+			[
+				'path'      => $fs_form_path,
+				'max_depth' => $fs_form_depth,
+			],
+			'',
+			'&',
+			PHP_QUERY_RFC3986
+		);
+		$t0                 = microtime( true );
+		$fs_scan_result     = demo_http_get_migration_key( $fs_url, $mkey );
+		$duration_seconds   = microtime( true ) - $t0;
+	} else {
+		$fs_scan_result = [
+			'ok'     => false,
+			'status' => 0,
+			'body'   => '',
+			'error'  => 'WordPress-Basis-URL oder Migration Key fehlt (nach /info in Session oder manuell eintragen).',
+		];
+	}
+
+	$dur_fmt = $duration_seconds !== null
+		? number_format( $duration_seconds, 3, ',', '' )
+		: '';
+
+	$html_meta = '<span>HTTP-Status: <strong>' . (int) $fs_scan_result['status'] . '</strong>';
+	if ( $duration_seconds !== null ) {
+		$html_meta .= ' · Abfrage-Dauer: <strong>' . htmlspecialchars( $dur_fmt, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . ' s</strong>';
+	}
+	if ( $fs_scan_result['error'] !== '' ) {
+		$html_meta .= ' <span class="bad">' . htmlspecialchars( $fs_scan_result['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</span>';
+	}
+	$html_meta .= '</span>';
+
+	$html_body = '';
+	if ( $fs_scan_result['error'] === '' && $fs_scan_result['ok'] ) {
+		$fs_json = json_decode( $fs_scan_result['body'], true );
+		if ( is_array( $fs_json ) && isset( $fs_json['entries'] ) && is_array( $fs_json['entries'] ) ) {
+			$nested = demo_fs_entries_to_nested_tree( $fs_json['entries'] );
+			$html_body .= '<p class="note">';
+			$html_body .= '<code>' . htmlspecialchars( rtrim( $wp_base_for_info, '/' ) . REST_FILESYSTEM_SCAN_PATH, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</code>';
+			$html_body .= ' · Einträge: ' . ( isset( $fs_json['entry_count'] ) ? (int) $fs_json['entry_count'] : count( $fs_json['entries'] ) );
+			if ( ! empty( $fs_json['truncated'] ) ) {
+				$html_body .= ' · <strong>gekürzt</strong> (Limit)';
+			}
+			$html_body .= ' · Bytes (Dateien): ' . ( isset( $fs_json['total_bytes'] ) ? (int) $fs_json['total_bytes'] : 0 );
+			$html_body .= '</p>';
+			$html_body .= '<div id="fs-tree-output">';
+			if ( $nested === [] ) {
+				$html_body .= '<p class="note">Keine Einträge (leeres Verzeichnis oder Filter).</p>';
+			} else {
+				$html_body .= demo_fs_render_tree_html( $nested );
+			}
+			$html_body .= '</div>';
+		} else {
+			$html_body .= '<pre>' . htmlspecialchars( $fs_scan_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</pre>';
+		}
+	} elseif ( $fs_scan_result['error'] === '' && ! $fs_scan_result['ok'] ) {
+		$html_body .= '<p class="bad">Anfrage fehlgeschlagen (HTTP ' . (int) $fs_scan_result['status'] . ').</p>';
+		$html_body .= '<pre>' . htmlspecialchars( $fs_scan_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ) . '</pre>';
+	}
+
+	return [
+		'ok'               => $fs_scan_result['ok'],
+		'status'           => $fs_scan_result['status'],
+		'body'             => $fs_scan_result['body'],
+		'error'            => $fs_scan_result['error'],
+		'duration_seconds' => $duration_seconds,
+		'html_meta'        => $html_meta,
+		'html_body'        => $html_body,
+	];
+}
+
 // -----------------------------------------------------------------------------
 // Eingaben
 // -----------------------------------------------------------------------------
@@ -441,7 +547,7 @@ if ( isset( $_GET['wpbackup_demo_site'] ) && is_string( $_GET['wpbackup_demo_sit
 	}
 }
 if ( $_SERVER['REQUEST_METHOD'] === 'POST'
-	&& isset( $_POST['demo_filesystem_scan'], $_POST['wpbackup_demo_site'] )
+	&& isset( $_POST['demo_filesystem_scan_ajax'], $_POST['wpbackup_demo_site'] )
 	&& is_string( $_POST['wpbackup_demo_site'] ) ) {
 	$normalized = demo_normalize_site_base( (string) $_POST['wpbackup_demo_site'] );
 	if ( $normalized !== '' ) {
@@ -502,60 +608,46 @@ if ( $info_result !== null && $info_result['ok'] && $info_result['error'] === ''
 	}
 }
 
-$fs_form_path             = 'uploads';
-$fs_form_depth            = 2;
-$fs_scan_result           = null;
-$fs_scan_duration_seconds = null;
-$fs_migration_override = isset( $_POST['migration_key_override'] ) && is_string( $_POST['migration_key_override'] )
-	? (string) $_POST['migration_key_override'] : '';
-
-if ( $_SERVER['REQUEST_METHOD'] === 'POST' && isset( $_POST['demo_filesystem_scan'] ) ) {
-	$fs_form_path = isset( $_POST['filesystem_scan_path'] ) ? trim( (string) $_POST['filesystem_scan_path'] ) : 'uploads';
-	if ( $fs_form_path === '' ) {
-		$fs_form_path = 'uploads';
-	}
-	$fs_form_depth = isset( $_POST['filesystem_scan_max_depth'] ) ? max( 0, min( 50, (int) $_POST['filesystem_scan_max_depth'] ) ) : 2;
-
-	$mkey = '';
-	if ( trim( $fs_migration_override ) !== '' ) {
-		$mkey = trim( $fs_migration_override );
-	} elseif (
-		isset( $_SESSION['wpbackup_demo_migration_key'], $_SESSION['wpbackup_demo_migration_key_site'] )
-		&& is_string( $_SESSION['wpbackup_demo_migration_key'] )
-		&& is_string( $_SESSION['wpbackup_demo_migration_key_site'] )
-		&& $_SESSION['wpbackup_demo_migration_key_site'] === $wp_base_for_info
-	) {
-		$mkey = $_SESSION['wpbackup_demo_migration_key'];
-	}
-
-	if ( $wp_base_for_info !== '' && $mkey !== '' ) {
-		$fs_url = rtrim( $wp_base_for_info, '/' ) . REST_FILESYSTEM_SCAN_PATH . '?' . http_build_query(
-			[
-				'path'      => $fs_form_path,
-				'max_depth' => $fs_form_depth,
-			],
-			'',
-			'&',
-			PHP_QUERY_RFC3986
-		);
-		$t0                       = microtime( true );
-		$fs_scan_result           = demo_http_get_migration_key( $fs_url, $mkey );
-		$fs_scan_duration_seconds = microtime( true ) - $t0;
-	} else {
-		$fs_scan_result = [
-			'ok'     => false,
-			'status' => 0,
-			'body'   => '',
-			'error'  => 'WordPress-Basis-URL oder Migration Key fehlt (nach /info in Session oder manuell eintragen).',
-		];
-	}
-}
+$fs_form_path  = 'uploads';
+$fs_form_depth = 2;
 
 $migration_key_raw = '';
 if ( isset( $_GET['migration_key'] ) && is_string( $_GET['migration_key'] ) ) {
 	$migration_key_raw = (string) $_GET['migration_key'];
 }
 $decoded_mk = $migration_key_raw !== '' ? demo_decode_display_migration_key( $migration_key_raw ) : null;
+
+// -----------------------------------------------------------------------------
+// AJAX: filesystem-scan (JSON, kein Seitenreload)
+// -----------------------------------------------------------------------------
+if ( $_SERVER['REQUEST_METHOD'] === 'POST' && isset( $_POST['demo_filesystem_scan_ajax'] ) ) {
+	$fs_ajax_path = isset( $_POST['filesystem_scan_path'] ) ? trim( (string) $_POST['filesystem_scan_path'] ) : 'uploads';
+	if ( $fs_ajax_path === '' ) {
+		$fs_ajax_path = 'uploads';
+	}
+	$fs_ajax_depth = isset( $_POST['filesystem_scan_max_depth'] ) ? max( 0, min( 50, (int) $_POST['filesystem_scan_max_depth'] ) ) : 2;
+	$fs_ajax_mig    = isset( $_POST['migration_key_override'] ) && is_string( $_POST['migration_key_override'] )
+		? (string) $_POST['migration_key_override'] : '';
+
+	$frag = demo_filesystem_scan_response_fragments( $wp_base_for_info, $fs_ajax_path, $fs_ajax_depth, $fs_ajax_mig );
+
+	header( 'Content-Type: application/json; charset=utf-8' );
+	header( 'X-Content-Type-Options: nosniff' );
+	echo json_encode(
+		[
+			'success'          => true,
+			'ok'               => $frag['ok'],
+			'status'           => $frag['status'],
+			'error'            => $frag['error'],
+			'body'             => $frag['body'],
+			'duration_seconds' => $frag['duration_seconds'],
+			'html_meta'        => $frag['html_meta'],
+			'html_body'        => $frag['html_body'],
+		],
+		JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+	);
+	exit;
+}
 
 // -----------------------------------------------------------------------------
 // Ausgabe
@@ -609,6 +701,9 @@ header( 'Content-Type: text/html; charset=utf-8' );
 		.fs-tree li { margin: 0.2rem 0; }
 		.fs-meta { color: #50575e; font-size: 0.88rem; font-weight: normal; }
 		#fs-tree-output { margin-top: 0.75rem; padding: 0.75rem; background: #f6f7f7; border: 1px solid #dcdcde; border-radius: 4px; overflow: auto; max-height: 28rem; }
+		#fs-scan-result { margin-top: 1rem; }
+		#fs-scan-meta { min-height: 1.35em; }
+		button.fs-scan-busy { opacity: 0.65; pointer-events: none; }
 	</style>
 </head>
 <body>
@@ -753,6 +848,51 @@ header( 'Content-Type: text/html; charset=utf-8' );
 				</p>
 			<?php endif; ?>
 
+			<?php if ( ! empty( $json['database_info'] ) && is_array( $json['database_info'] ) ) : ?>
+				<?php
+				$dbi = $json['database_info'];
+				?>
+				<p>
+					<strong>database_info:</strong>
+					Tabellen: <code><?php echo isset( $dbi['table_count'] ) ? (int) $dbi['table_count'] : 0; ?></code>
+					· Daten: <code><?php echo isset( $dbi['total_data_bytes'] ) ? (int) $dbi['total_data_bytes'] : 0; ?></code> B
+					(≈ <?php echo htmlspecialchars( demo_format_bytes( isset( $dbi['total_data_bytes'] ) ? (int) $dbi['total_data_bytes'] : 0 ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>)
+					<?php if ( isset( $dbi['total_bytes'] ) && is_numeric( $dbi['total_bytes'] ) ) : ?>
+						· Gesamt inkl. Indizes: <code><?php echo (int) $dbi['total_bytes']; ?></code> B
+						(≈ <?php echo htmlspecialchars( demo_format_bytes( (int) $dbi['total_bytes'] ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>)
+					<?php endif; ?>
+				</p>
+
+				<?php if ( ! empty( $dbi['tables'] ) && is_array( $dbi['tables'] ) ) : ?>
+					<div class="table-wrap">
+						<table>
+							<caption>Datenbanktabellen (<code>database_info.tables</code>)</caption>
+							<thead>
+								<tr>
+									<th scope="col">Tabelle</th>
+									<th scope="col">Records</th>
+									<th scope="col">Daten (B)</th>
+									<th scope="col">Indizes (B)</th>
+									<th scope="col">Gesamt (B)</th>
+								</tr>
+							</thead>
+							<tbody>
+								<?php foreach ( $dbi['tables'] as $tbl ) : ?>
+									<?php if ( ! is_array( $tbl ) ) { continue; } ?>
+									<tr>
+										<td><code><?php echo htmlspecialchars( (string) ( $tbl['name'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td>
+										<td><?php echo isset( $tbl['records'] ) ? (int) $tbl['records'] : 0; ?></td>
+										<td><?php echo isset( $tbl['data_bytes'] ) ? (int) $tbl['data_bytes'] : 0; ?></td>
+										<td><?php echo isset( $tbl['index_bytes'] ) ? (int) $tbl['index_bytes'] : 0; ?></td>
+										<td><?php echo isset( $tbl['total_bytes'] ) ? (int) $tbl['total_bytes'] : 0; ?></td>
+									</tr>
+								<?php endforeach; ?>
+							</tbody>
+						</table>
+					</div>
+				<?php endif; ?>
+			<?php endif; ?>
+
 			<?php if ( ! empty( $json['list_plugins'] ) && is_array( $json['list_plugins'] ) ) : ?>
 				<div class="table-wrap">
 					<table>
@@ -823,9 +963,9 @@ header( 'Content-Type: text/html; charset=utf-8' );
 
 			<?php
 			$json_for_pre = $json;
-			unset( $json_for_pre['list_plugins'], $json_for_pre['list_themes'] );
+			unset( $json_for_pre['database_info'], $json_for_pre['list_plugins'], $json_for_pre['list_themes'] );
 			?>
-			<p class="note">Weitere Felder (JSON ohne Plugin-/Themenlisten):</p>
+			<p class="note">Weitere Felder (JSON ohne DB-/Plugin-/Themenlisten):</p>
 			<pre><?php echo htmlspecialchars( json_encode( $json_for_pre, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
 		<?php else : ?>
 			<pre><?php echo htmlspecialchars( $info_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
@@ -845,7 +985,6 @@ header( 'Content-Type: text/html; charset=utf-8' );
 </p>
 <form method="post" action="" id="demo-filesystem-scan-form">
 	<input type="hidden" name="wpbackup_demo_site" value="<?php echo htmlspecialchars( $form_site, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>">
-	<input type="hidden" name="demo_filesystem_scan" value="1">
 	<div class="row">
 		<label for="filesystem_scan_path">Pfad unter <code>wp-content</code> (<code>filesystem-scan-path</code>)</label>
 		<input type="text" id="filesystem_scan_path" name="filesystem_scan_path" value="<?php echo htmlspecialchars( $fs_form_path, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>" placeholder="uploads oder .">
@@ -858,49 +997,13 @@ header( 'Content-Type: text/html; charset=utf-8' );
 		<label for="migration_key_override">Migration Key (optional, falls nicht aus /info-Session)</label>
 		<input type="password" id="migration_key_override" name="migration_key_override" value="" autocomplete="off" placeholder="Leer = Session nach Abschnitt 5">
 	</div>
-	<button type="submit" class="secondary">filesystem-scan ausführen</button>
+	<button type="submit" class="secondary" id="demo-filesystem-scan-submit">filesystem-scan ausführen</button>
 </form>
 
-<?php if ( $fs_scan_result !== null ) : ?>
-	<p>HTTP-Status: <strong><?php echo (int) $fs_scan_result['status']; ?></strong>
-		<?php if ( $fs_scan_duration_seconds !== null ) : ?>
-			· Abfrage-Dauer: <strong><?php echo htmlspecialchars( number_format( $fs_scan_duration_seconds, 3, ',', '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?> s</strong>
-		<?php endif; ?>
-		<?php if ( $fs_scan_result['error'] !== '' ) : ?>
-			<span class="bad"><?php echo htmlspecialchars( $fs_scan_result['error'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></span>
-		<?php endif; ?>
-	</p>
-	<?php if ( $fs_scan_result['error'] === '' && $fs_scan_result['ok'] ) : ?>
-		<?php
-		$fs_json = json_decode( $fs_scan_result['body'], true );
-		?>
-		<?php if ( is_array( $fs_json ) && isset( $fs_json['entries'] ) && is_array( $fs_json['entries'] ) ) : ?>
-			<?php
-			$nested = demo_fs_entries_to_nested_tree( $fs_json['entries'] );
-			?>
-			<p class="note">
-				<code><?php echo htmlspecialchars( rtrim( $wp_base_for_info, '/' ) . REST_FILESYSTEM_SCAN_PATH, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code>
-				· Einträge: <?php echo isset( $fs_json['entry_count'] ) ? (int) $fs_json['entry_count'] : count( $fs_json['entries'] ); ?>
-				<?php if ( ! empty( $fs_json['truncated'] ) ) : ?>
-					· <strong>gekürzt</strong> (Limit)
-				<?php endif; ?>
-				· Bytes (Dateien): <?php echo isset( $fs_json['total_bytes'] ) ? (int) $fs_json['total_bytes'] : 0; ?>
-			</p>
-			<div id="fs-tree-output">
-				<?php if ( $nested === [] ) : ?>
-					<p class="note">Keine Einträge (leeres Verzeichnis oder Filter).</p>
-				<?php else : ?>
-					<?php echo demo_fs_render_tree_html( $nested ); ?>
-				<?php endif; ?>
-			</div>
-		<?php else : ?>
-			<pre><?php echo htmlspecialchars( $fs_scan_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
-		<?php endif; ?>
-	<?php elseif ( $fs_scan_result['error'] === '' && ! $fs_scan_result['ok'] ) : ?>
-		<p class="bad">Anfrage fehlgeschlagen (HTTP <?php echo (int) $fs_scan_result['status']; ?>).</p>
-		<pre><?php echo htmlspecialchars( $fs_scan_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
-	<?php endif; ?>
-<?php endif; ?>
+<div id="fs-scan-result" class="note" hidden>
+	<p id="fs-scan-meta" class="note"></p>
+	<div id="fs-scan-body"></div>
+</div>
 
 <h2>Hinweise (Auto-Install &amp; Demo)</h2>
 <ul class="note">
@@ -952,6 +1055,90 @@ header( 'Content-Type: text/html; charset=utf-8' );
 	if (!currentParamSite() && input.value.trim() && urlLine.test(input.value.trim())) {
 		scheduleProbe();
 	}
+})();
+
+(function () {
+	var form = document.getElementById('demo-filesystem-scan-form');
+	var btn = document.getElementById('demo-filesystem-scan-submit');
+	var wrap = document.getElementById('fs-scan-result');
+	var metaEl = document.getElementById('fs-scan-meta');
+	var bodyEl = document.getElementById('fs-scan-body');
+	if (!form || !metaEl || !bodyEl) return;
+
+	var loadTimer = null;
+	var loadT0 = 0;
+
+	function formatDeSeconds(t) {
+		return (Math.round(t * 100) / 100).toFixed(2).replace('.', ',');
+	}
+
+	function startLoadingMeta() {
+		loadT0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+		if (loadTimer) clearInterval(loadTimer);
+		loadTimer = setInterval(function () {
+			var now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+			var elapsed = (now - loadT0) / 1000;
+			metaEl.innerHTML = 'Anfrage läuft … <strong>' + formatDeSeconds(elapsed) + ' s</strong> <span class="note">(Wartezeit im Browser)</span>';
+		}, 80);
+	}
+
+	function stopLoadingMeta() {
+		if (loadTimer) {
+			clearInterval(loadTimer);
+			loadTimer = null;
+		}
+	}
+
+	form.addEventListener('submit', function (e) {
+		e.preventDefault();
+		var fd = new FormData(form);
+		fd.set('demo_filesystem_scan_ajax', '1');
+		bodyEl.innerHTML = '';
+		if (wrap) wrap.hidden = false;
+		startLoadingMeta();
+		if (btn) btn.classList.add('fs-scan-busy');
+
+		var url = form.getAttribute('action');
+		var postUrl = url && url.trim() !== '' ? new URL(url, window.location.href).href : window.location.href;
+
+		fetch(postUrl, {
+			method: 'POST',
+			body: fd,
+			credentials: 'same-origin',
+			headers: { Accept: 'application/json' }
+		})
+			.then(function (res) {
+				return res.text().then(function (text) {
+					var data = null;
+					try {
+						data = JSON.parse(text);
+					} catch (err) {
+						throw new Error('Ungültige JSON-Antwort vom Callback.');
+					}
+					if (!res.ok) {
+						throw new Error(data && data.error ? data.error : 'HTTP ' + res.status);
+					}
+					return data;
+				});
+			})
+			.then(function (data) {
+				stopLoadingMeta();
+				if (data && data.html_meta) {
+					metaEl.innerHTML = data.html_meta;
+				} else {
+					metaEl.textContent = '';
+				}
+				bodyEl.innerHTML = data && data.html_body ? data.html_body : '';
+			})
+			.catch(function (err) {
+				stopLoadingMeta();
+				metaEl.innerHTML = '<span class="bad">' + (err && err.message ? String(err.message) : 'Anfrage fehlgeschlagen.') + '</span>';
+				bodyEl.innerHTML = '';
+			})
+			.finally(function () {
+				if (btn) btn.classList.remove('fs-scan-busy');
+			});
+	});
 })();
 </script>
 

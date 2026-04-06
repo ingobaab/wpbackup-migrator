@@ -30,6 +30,7 @@ Authorization: Basic base64(user:application_password)
 | `prefix` | string | Tabellen-Präfix |
 | `php_version`, `wp_version` | string | Laufzeit |
 | `database_size` | int | Datenbank-Datengröße in Bytes (Summe `Data_length` der Präfix-Tabellen) |
+| `database_info` | object | Tabellenübersicht: `table_count`, Summen (`total_data_bytes`, `total_index_bytes`, `total_bytes`) und `tables[]` je Tabelle |
 | `media_size` | int | **Geschätzte** Größe der Mediathek (Hauptdateien + registrierte Thumbnails) in Bytes |
 | `list_plugins` | array | Installierte Plugins (inkl. MU-Plugins), siehe Objektstruktur unten |
 | `list_themes` | array | Installierte Themes, siehe Objektstruktur unten |
@@ -61,6 +62,16 @@ Authorization: Basic base64(user:application_password)
 | `is_child` | bool | Hat ein Parent-Theme |
 | `parent` | string | Stylesheet-Slug des Parent (leer wenn nicht Child) |
 | `parent_version` | string | Version des Parent-Themes |
+
+**`database_info`:** Schnelle Tabellenübersicht (ohne `COUNT(*)` je Tabelle). Die Werte stammen aus `SHOW TABLE STATUS` für das aktuelle Tabellenpräfix und sind damit i. d. R. sehr performant; `records` kann je Storage-Engine/Statistik ein Näherungswert sein.
+
+| Feld | Typ | Bedeutung |
+|------|-----|-----------|
+| `table_count` | int | Anzahl erkannter Tabellen mit Site-Präfix |
+| `total_data_bytes` | int | Summe der Datenblöcke (`Data_length`) |
+| `total_index_bytes` | int | Summe der Indexblöcke (`Index_length`) |
+| `total_bytes` | int | `total_data_bytes + total_index_bytes` |
+| `tables` | array | Liste je Tabelle mit `name`, `records`, `data_bytes`, `index_bytes`, `total_bytes` |
 
 ---
 
