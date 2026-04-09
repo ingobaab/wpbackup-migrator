@@ -51,6 +51,11 @@ class Api {
 	private $table_status_cache = null;
 
 	/**
+	 * Max. Anzahl Einträge in `autoload.entries` (Rest nur aggregiert).
+	 */
+	const AUTOLOAD_ENTRIES_LIMIT = 20;
+
+	/**
 	 * Constructor
 	 */
 	public function __construct() {
@@ -157,10 +162,173 @@ class Api {
 			'wp_version'            => get_bloginfo( 'version' ),
 			'database_size'         => $database_info['total_data_bytes'],
 			'database_info'         => $database_info,
+			'autoload'              => $this->get_autoload_options_for_info(),
+			'runtime_limits'        => $this->get_runtime_limits_for_info(),
 			'media_size'            => $this->estimate_media_library_size_bytes(),
 			'list_plugins'          => $this->get_list_plugins_for_info(),
 			'list_themes'           => $this->get_list_themes_for_info(),
 			'is_wp_cron_disabled'   => defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON === true,
+		];
+	}
+
+	/**
+	 * wp_options: autoload=yes – Namen und Wertlängen (ohne option_value zu laden).
+	 *
+	 * Zusätzlich kompakte Verteilung aller autoload-Werte (GROUP BY).
+	 *
+	 * @return array{
+	 *   filter:string,
+	 *   entry_count:int,
+	 *   total_value_bytes:int,
+	 *   entries_limit:int,
+	 *   entries_truncated:bool,
+	 *   entries:list<array{option_name:string, value_bytes:int}>,
+	 *   by_autoload:list<array{autoload:string, option_count:int, total_value_bytes:int}>
+	 * }
+	 */
+	private function get_autoload_options_for_info() {
+		global $wpdb;
+
+		$filter = 'yes';
+		$limit  = self::AUTOLOAD_ENTRIES_LIMIT;
+
+		$totals = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT COUNT(*) AS entry_count,
+					COALESCE( SUM( LENGTH( option_value ) ), 0 ) AS total_value_bytes
+				FROM {$wpdb->options}
+				WHERE autoload = %s",
+				$filter
+			),
+			ARRAY_A
+		);
+
+		$entry_count       = is_array( $totals ) && isset( $totals['entry_count'] ) ? max( 0, (int) $totals['entry_count'] ) : 0;
+		$total_value_bytes = is_array( $totals ) && isset( $totals['total_value_bytes'] ) ? max( 0, (int) $totals['total_value_bytes'] ) : 0;
+
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT option_name, LENGTH( option_value ) AS value_bytes
+				FROM {$wpdb->options}
+				WHERE autoload = %s
+				ORDER BY value_bytes DESC
+				LIMIT %d",
+				$filter,
+				$limit
+			),
+			ARRAY_A
+		);
+
+		$entries = [];
+		if ( is_array( $rows ) ) {
+			foreach ( $rows as $row ) {
+				if ( ! is_array( $row ) ) {
+					continue;
+				}
+				$name = isset( $row['option_name'] ) ? (string) $row['option_name'] : '';
+				$vb   = isset( $row['value_bytes'] ) ? max( 0, (int) $row['value_bytes'] ) : 0;
+				$entries[] = [
+					'option_name' => $name,
+					'value_bytes' => $vb,
+				];
+			}
+		}
+
+		$by_autoload = [];
+		// phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared -- statische Aggregation, keine Variablen.
+		$group_rows = $wpdb->get_results(
+			"SELECT autoload, COUNT(*) AS option_count,
+				COALESCE( SUM( LENGTH( option_value ) ), 0 ) AS total_value_bytes
+			FROM {$wpdb->options}
+			GROUP BY autoload
+			ORDER BY autoload ASC",
+			ARRAY_A
+		);
+
+		if ( is_array( $group_rows ) ) {
+			foreach ( $group_rows as $gr ) {
+				if ( ! is_array( $gr ) ) {
+					continue;
+				}
+				$al = isset( $gr['autoload'] ) ? (string) $gr['autoload'] : '';
+				$by_autoload[] = [
+					'autoload'          => $al,
+					'option_count'      => isset( $gr['option_count'] ) ? max( 0, (int) $gr['option_count'] ) : 0,
+					'total_value_bytes' => isset( $gr['total_value_bytes'] ) ? max( 0, (int) $gr['total_value_bytes'] ) : 0,
+				];
+			}
+		}
+
+		return [
+			'filter'              => $filter,
+			'entry_count'         => $entry_count,
+			'total_value_bytes'   => min( $total_value_bytes, PHP_INT_MAX ),
+			'entries_limit'       => $limit,
+			'entries_truncated'   => $entry_count > $limit,
+			'entries'             => $entries,
+			'by_autoload'         => $by_autoload,
+		];
+	}
+
+	/**
+	 * Wichtige PHP-Limits und OPcache-Kurzstatus (ohne phpinfo()).
+	 *
+	 * @return array<string, mixed>
+	 */
+	private function get_runtime_limits_for_info() {
+		$ini = static function ( $key ) {
+			$v = ini_get( $key );
+
+			return false === $v ? '' : (string) $v;
+		};
+
+		$opcache = [
+			'zend_extension_loaded' => extension_loaded( 'Zend OPcache' ),
+			'enabled'                 => null,
+			'cache_full'              => null,
+			'memory'                  => null,
+			'interned_strings'        => null,
+			'jit_enabled'             => null,
+		];
+
+		if ( function_exists( 'opcache_get_status' ) ) {
+			$status = opcache_get_status( false );
+			if ( is_array( $status ) ) {
+				$opcache['enabled']    = ! empty( $status['opcache_enabled'] );
+				$opcache['cache_full'] = isset( $status['cache_full'] ) ? (bool) $status['cache_full'] : null;
+				if ( isset( $status['memory_usage'] ) && is_array( $status['memory_usage'] ) ) {
+					$mu                 = $status['memory_usage'];
+					$opcache['memory'] = [
+						'used_memory'   => isset( $mu['used_memory'] ) ? (int) $mu['used_memory'] : null,
+						'free_memory'   => isset( $mu['free_memory'] ) ? (int) $mu['free_memory'] : null,
+						'wasted_memory' => isset( $mu['wasted_memory'] ) ? (int) $mu['wasted_memory'] : null,
+					];
+				}
+				if ( isset( $status['interned_strings_usage'] ) && is_array( $status['interned_strings_usage'] ) ) {
+					$is = $status['interned_strings_usage'];
+					$opcache['interned_strings'] = [
+						'used_memory' => isset( $is['used_memory'] ) ? (int) $is['used_memory'] : null,
+						'buffer_size' => isset( $is['buffer_size'] ) ? (int) $is['buffer_size'] : null,
+					];
+				}
+				if ( isset( $status['jit'] ) && is_array( $status['jit'] ) ) {
+					$opcache['jit_enabled'] = ! empty( $status['jit']['enabled'] );
+				}
+			}
+		}
+
+		return [
+			'sapi'                   => PHP_SAPI,
+			'memory_limit'           => $ini( 'memory_limit' ),
+			'max_execution_time'     => $ini( 'max_execution_time' ),
+			'max_input_time'         => $ini( 'max_input_time' ),
+			'post_max_size'          => $ini( 'post_max_size' ),
+			'upload_max_filesize'    => $ini( 'upload_max_filesize' ),
+			'max_input_vars'         => $ini( 'max_input_vars' ),
+			'default_socket_timeout' => $ini( 'default_socket_timeout' ),
+			'realpath_cache_size'    => $ini( 'realpath_cache_size' ),
+			'max_file_uploads'       => $ini( 'max_file_uploads' ),
+			'opcache'                => $opcache,
 		];
 	}
 

@@ -17,7 +17,7 @@ if ( session_status() === PHP_SESSION_NONE ) {
 }
 
 // --- Konfiguration ---
-const DEMO_DEFAULT_SITE = 'https://infoportal.arm64.baab.de';
+const DEMO_DEFAULT_SITE = 'https://maschenmarie.de';
 const REST_INFO_PATH             = '/wp-json/wpbackup-migrator/v1/info';
 const REST_FILESYSTEM_SCAN_PATH  = '/wp-json/wpbackup-migrator/v1/filesystem-scan';
 const APP_NAME                   = 'WPBackup Migrator';
@@ -582,11 +582,8 @@ $authorize_url = rtrim( $form_site, '/' ) . '/wp-admin/authorize-application.php
 	. '?app_name=' . rawurlencode( APP_NAME )
 	. '&success_url=' . rawurlencode( $success_url );
 
-$info_result        = null;
-$info_json          = null;
-$info_download_href = '';
-$info_download_name = '';
-$wp_base_for_info   = '';
+$info_result      = null;
+$wp_base_for_info = '';
 if ( isset( $_GET['site_url'] ) && is_string( $_GET['site_url'] ) ) {
 	$wp_base_for_info = demo_normalize_site_base( (string) $_GET['site_url'] );
 }
@@ -608,36 +605,6 @@ if ( $info_result !== null && $info_result['ok'] && $info_result['error'] === ''
 	if ( is_array( $info_json ) && isset( $info_json['key'] ) && is_string( $info_json['key'] ) && $info_json['key'] !== '' ) {
 		$_SESSION['wpbackup_demo_migration_key']      = $info_json['key'];
 		$_SESSION['wpbackup_demo_migration_key_site'] = $wp_base_for_info;
-	}
-	if ( is_array( $info_json ) ) {
-		$info_json_pretty = json_encode( $info_json, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
-		if ( is_string( $info_json_pretty ) && $info_json_pretty !== '' ) {
-			$source_url = (string) ( $info_json['url'] ?? $wp_base_for_info );
-			$safe_url   = preg_replace( '#^https?://#i', '', trim( $source_url ) );
-			$safe_url   = is_string( $safe_url ) ? $safe_url : '';
-			$safe_url   = preg_replace( '/[^a-z0-9._-]+/i', '_', $safe_url );
-			$safe_url   = trim( is_string( $safe_url ) ? $safe_url : '', '._-' );
-			if ( $safe_url === '' ) {
-				$safe_url = 'site';
-			}
-			$timestamp_utc = gmdate( 'Ymd\THis\Z' );
-
-			$data_dir = __DIR__ . '/data';
-			if ( ! is_dir( $data_dir ) ) {
-				@mkdir( $data_dir, 0775, true );
-			}
-			if ( is_dir( $data_dir ) && is_writable( $data_dir ) ) {
-				$persist_file = $data_dir . '/' . $timestamp_utc . '_' . $safe_url . '.json';
-				@file_put_contents( $persist_file, $info_json_pretty );
-			}
-
-			$info_download_href = 'data:application/json;charset=utf-8,' . rawurlencode( $info_json_pretty );
-			$host_for_name      = parse_url( (string) ( $info_json['url'] ?? '' ), PHP_URL_HOST );
-			$host_slug          = is_string( $host_for_name ) && $host_for_name !== ''
-				? preg_replace( '/[^a-z0-9.-]+/i', '-', strtolower( $host_for_name ) )
-				: 'site';
-			$info_download_name = 'wpbackup-info-' . trim( (string) $host_slug, '-.' ) . '-' . gmdate( 'Ymd-His' ) . '.json';
-		}
 	}
 }
 
@@ -881,52 +848,6 @@ header( 'Content-Type: text/html; charset=utf-8' );
 				</p>
 			<?php endif; ?>
 
-			<?php if ( ! empty( $json['runtime_limits'] ) && is_array( $json['runtime_limits'] ) ) : ?>
-				<?php $rtl = $json['runtime_limits']; ?>
-				<div class="table-wrap">
-					<table>
-						<caption>PHP-Laufzeit (<code>runtime_limits</code>)</caption>
-						<thead>
-							<tr>
-								<th scope="col">Parameter</th>
-								<th scope="col">Wert</th>
-							</tr>
-						</thead>
-						<tbody>
-							<tr>
-								<td><code>sapi</code></td>
-								<td><code><?php echo htmlspecialchars( (string) ( $rtl['sapi'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td>
-							</tr>
-							<tr><td><code>memory_limit</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['memory_limit'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>max_execution_time</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['max_execution_time'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>max_input_time</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['max_input_time'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>post_max_size</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['post_max_size'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>upload_max_filesize</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['upload_max_filesize'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>max_input_vars</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['max_input_vars'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>default_socket_timeout</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['default_socket_timeout'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>realpath_cache_size</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['realpath_cache_size'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<tr><td><code>max_file_uploads</code></td><td><code><?php echo htmlspecialchars( (string) ( $rtl['max_file_uploads'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td></tr>
-							<?php if ( ! empty( $rtl['opcache'] ) && is_array( $rtl['opcache'] ) ) : ?>
-								<?php $op = $rtl['opcache']; ?>
-								<tr><td colspan="2"><strong>OPcache</strong></td></tr>
-								<tr><td><code>zend_extension_loaded</code></td><td><?php echo ! empty( $op['zend_extension_loaded'] ) ? 'ja' : 'nein'; ?></td></tr>
-								<tr><td><code>enabled</code></td><td><?php echo isset( $op['enabled'] ) && $op['enabled'] !== null ? ( $op['enabled'] ? 'ja' : 'nein' ) : '—'; ?></td></tr>
-								<tr><td><code>cache_full</code></td><td><?php echo isset( $op['cache_full'] ) && $op['cache_full'] !== null ? ( $op['cache_full'] ? 'ja' : 'nein' ) : '—'; ?></td></tr>
-								<tr><td><code>jit_enabled</code></td><td><?php echo isset( $op['jit_enabled'] ) && $op['jit_enabled'] !== null ? ( $op['jit_enabled'] ? 'ja' : 'nein' ) : '—'; ?></td></tr>
-								<?php if ( ! empty( $op['memory'] ) && is_array( $op['memory'] ) ) : ?>
-									<tr><td><code>memory used / free / wasted</code></td>
-										<td><code><?php echo (int) ( $op['memory']['used_memory'] ?? 0 ); ?></code> / <code><?php echo (int) ( $op['memory']['free_memory'] ?? 0 ); ?></code> / <code><?php echo (int) ( $op['memory']['wasted_memory'] ?? 0 ); ?></code> (Bytes)</td></tr>
-								<?php endif; ?>
-								<?php if ( ! empty( $op['interned_strings'] ) && is_array( $op['interned_strings'] ) ) : ?>
-									<tr><td><code>interned_strings used / buffer</code></td>
-										<td><code><?php echo (int) ( $op['interned_strings']['used_memory'] ?? 0 ); ?></code> / <code><?php echo (int) ( $op['interned_strings']['buffer_size'] ?? 0 ); ?></code> (Bytes)</td></tr>
-								<?php endif; ?>
-							<?php endif; ?>
-						</tbody>
-					</table>
-				</div>
-			<?php endif; ?>
-
 			<?php if ( ! empty( $json['database_info'] ) && is_array( $json['database_info'] ) ) : ?>
 				<?php
 				$dbi = $json['database_info'];
@@ -964,74 +885,6 @@ header( 'Content-Type: text/html; charset=utf-8' );
 										<td><?php echo isset( $tbl['data_bytes'] ) ? (int) $tbl['data_bytes'] : 0; ?></td>
 										<td><?php echo isset( $tbl['index_bytes'] ) ? (int) $tbl['index_bytes'] : 0; ?></td>
 										<td><?php echo isset( $tbl['total_bytes'] ) ? (int) $tbl['total_bytes'] : 0; ?></td>
-									</tr>
-								<?php endforeach; ?>
-							</tbody>
-						</table>
-					</div>
-				<?php endif; ?>
-			<?php endif; ?>
-
-			<?php if ( ! empty( $json['autoload'] ) && is_array( $json['autoload'] ) ) : ?>
-				<?php
-				$alo = $json['autoload'];
-				?>
-				<p>
-					<strong>autoload</strong> (<code>autoload = <?php echo htmlspecialchars( (string) ( $alo['filter'] ?? 'yes' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code>):
-					Einträge: <code><?php echo isset( $alo['entry_count'] ) ? (int) $alo['entry_count'] : 0; ?></code>
-					· Summe Wertlängen: <code><?php echo isset( $alo['total_value_bytes'] ) ? (int) $alo['total_value_bytes'] : 0; ?></code> B
-					(≈ <?php echo htmlspecialchars( demo_format_bytes( isset( $alo['total_value_bytes'] ) ? (int) $alo['total_value_bytes'] : 0 ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>)
-					· Liste: max. <code><?php echo isset( $alo['entries_limit'] ) ? (int) $alo['entries_limit'] : 20; ?></code> Einträge (größte zuerst)
-					<?php if ( ! empty( $alo['entries_truncated'] ) ) : ?>
-						· <strong>gekürzt</strong> (<code>entries_truncated</code>)
-					<?php endif; ?>
-				</p>
-				<?php if ( ! empty( $alo['by_autoload'] ) && is_array( $alo['by_autoload'] ) ) : ?>
-					<div class="table-wrap">
-						<table>
-							<caption>Verteilung <code>wp_options.autoload</code> (<code>autoload.by_autoload</code>)</caption>
-							<thead>
-								<tr>
-									<th scope="col">autoload</th>
-									<th scope="col">Anzahl Optionen</th>
-									<th scope="col">Summe LENGTH(option_value) (B)</th>
-								</tr>
-							</thead>
-							<tbody>
-								<?php foreach ( $alo['by_autoload'] as $gr ) : ?>
-									<?php if ( ! is_array( $gr ) ) { continue; } ?>
-									<tr>
-										<td><code><?php echo htmlspecialchars( (string) ( $gr['autoload'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td>
-										<td><?php echo isset( $gr['option_count'] ) ? (int) $gr['option_count'] : 0; ?></td>
-										<td><?php echo isset( $gr['total_value_bytes'] ) ? (int) $gr['total_value_bytes'] : 0; ?></td>
-									</tr>
-								<?php endforeach; ?>
-							</tbody>
-						</table>
-					</div>
-				<?php endif; ?>
-
-				<?php if ( ! empty( $alo['entries'] ) && is_array( $alo['entries'] ) ) : ?>
-					<div class="table-wrap">
-						<table>
-							<caption>Größte Optionen mit <code>autoload = yes</code> (<code>autoload.entries</code>, max. <?php echo isset( $alo['entries_limit'] ) ? (int) $alo['entries_limit'] : 20; ?>, nach <code>LENGTH(option_value)</code> absteigend)</caption>
-							<thead>
-								<tr>
-									<th scope="col">option_name</th>
-									<th scope="col">LENGTH (B)</th>
-									<th scope="col">≈ lesbar</th>
-								</tr>
-							</thead>
-							<tbody>
-								<?php foreach ( $alo['entries'] as $opt ) : ?>
-									<?php if ( ! is_array( $opt ) ) { continue; } ?>
-									<?php
-									$vb = isset( $opt['value_bytes'] ) ? (int) $opt['value_bytes'] : 0;
-									?>
-									<tr>
-										<td class="name"><code><?php echo htmlspecialchars( (string) ( $opt['option_name'] ?? '' ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></code></td>
-										<td><?php echo $vb; ?></td>
-										<td><?php echo htmlspecialchars( demo_format_bytes( $vb ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></td>
 									</tr>
 								<?php endforeach; ?>
 							</tbody>
@@ -1110,9 +963,9 @@ header( 'Content-Type: text/html; charset=utf-8' );
 
 			<?php
 			$json_for_pre = $json;
-			unset( $json_for_pre['autoload'], $json_for_pre['database_info'], $json_for_pre['list_plugins'], $json_for_pre['list_themes'], $json_for_pre['runtime_limits'] );
+			unset( $json_for_pre['database_info'], $json_for_pre['list_plugins'], $json_for_pre['list_themes'] );
 			?>
-			<p class="note">Weitere Felder (JSON ohne DB-/Autoload-/Runtime-/Plugin-/Themenlisten):</p>
+			<p class="note">Weitere Felder (JSON ohne DB-/Plugin-/Themenlisten):</p>
 			<pre><?php echo htmlspecialchars( json_encode( $json_for_pre, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
 		<?php else : ?>
 			<pre><?php echo htmlspecialchars( $info_result['body'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?></pre>
@@ -1159,10 +1012,6 @@ header( 'Content-Type: text/html; charset=utf-8' );
 	<li>Der Parameter <code>migration_key</code> gehört <strong>nicht</strong> zum Standard-Redirect von WordPress; er kann ergänzt werden oder man kopiert den Key aus den WP-Einstellungen zum Testen:
 		<code>?migration_key=…</code> an diese URL anhängen.</li>
 </ul>
-
-<?php if ( $info_download_href !== '' ) : ?>
-	<p><a href="<?php echo htmlspecialchars( $info_download_href, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>" download="<?php echo htmlspecialchars( $info_download_name !== '' ? $info_download_name : 'wpbackup-info.json', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' ); ?>">/info-JSON herunterladen</a></p>
-<?php endif; ?>
 
 <script>
 (function () {

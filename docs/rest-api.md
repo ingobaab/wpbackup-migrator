@@ -31,6 +31,8 @@ Authorization: Basic base64(user:application_password)
 | `php_version`, `wp_version` | string | Laufzeit |
 | `database_size` | int | Datenbank-Datengröße in Bytes (Summe `Data_length` der Präfix-Tabellen) |
 | `database_info` | object | Tabellenübersicht: `table_count`, Summen (`total_data_bytes`, `total_index_bytes`, `total_bytes`) und `tables[]` je Tabelle |
+| `autoload` | object | `wp_options` mit `autoload = 'yes'`: Gesamtzähler/Summe, Detail-`entries[]` (**max. 20**, größte zuerst), plus `by_autoload[]` (Verteilung aller `autoload`-Werte) |
+| `runtime_limits` | object | Wichtige `ini_get`-Werte (`memory_limit`, `max_execution_time`, …) und kompakter OPcache-Status (ohne `phpinfo()`) |
 | `media_size` | int | **Geschätzte** Größe der Mediathek (Hauptdateien + registrierte Thumbnails) in Bytes |
 | `list_plugins` | array | Installierte Plugins (inkl. MU-Plugins), siehe Objektstruktur unten |
 | `list_themes` | array | Installierte Themes, siehe Objektstruktur unten |
@@ -73,6 +75,15 @@ Authorization: Basic base64(user:application_password)
 | `total_bytes` | int | `total_data_bytes + total_index_bytes` |
 | `tables` | array | Liste je Tabelle mit `name`, `records`, `data_bytes`, `index_bytes`, `total_bytes` |
 
+**`autoload`:** Schnelle SQL-Abfragen (kein Laden der `option_value`-Inhalte in PHP):
+
+- **`filter`:** aktuell fest `yes`.
+- **`entry_count` / `total_value_bytes`:** Gesamtanzahl Zeilen mit `autoload = 'yes'` und Summe aller `LENGTH(option_value)` für diesen Filter (eine Aggregations-Query).
+- **`entries`:** höchstens **20** Einträge – die **größten** nach `LENGTH(option_value)` (zweite Query mit `LIMIT 20`). `entries_limit` = `20`, `entries_truncated` = `true`, wenn es mehr als 20 `yes`-Optionen gibt.
+- **`by_autoload`:** je vorhandenem `autoload`-Wert in `wp_options`: Anzahl Optionen und Summe `LENGTH(option_value)` (Überblick auch für `no`, `auto`, … je nach DB-Stand).
+
+**`runtime_limits`:** Enthält u. a. `sapi`, zentrale PHP-Limits als Zeichenketten (`ini_get`) und unter `opcache` u. a. `zend_extension_loaded`, `enabled`, `cache_full`, `jit_enabled`, sowie bei Verfügbarkeit numerische Speicher-/Interned-Strings-Werte. `opcache_get_status()` kann auf manchen Hostings deaktiviert sein; dann bleiben `enabled` u. a. leer (`null`).
+
 ---
 
 ## `POST /verify`
@@ -81,7 +92,9 @@ Prüft den Migration Key (Body-Parameter `key`).
 
 **Authentifizierung:** keine (öffentlicher Endpunkt); stattdessen muss `key` dem gespeicherten Migration Key entsprechen.
 
-**Antwort:** Gleiche Felder wie bei `GET /info` (inkl. `database_size`, `media_size`, `list_plugins`, `list_themes`), sofern der Key gültig ist.
+**Antwort:** Gleiche Felder wie bei `GET /info` (inkl. `database_size`, `database_info`, `autoload`, `runtime_limits`, `media_size`, `list_plugins`, `list_themes`), sofern der Key gültig ist.
+
+**Zweck:** Migrationstools können so die **volle Info-Payload** abrufen, **ohne** WordPress-Benutzer und **ohne** Application Password – es reicht der bekannte Migration Key. `/info` bleibt für Admin+Basic-Auth; `/verify` ist die maschinelle Alternative mit geteiltem Geheimnis.
 
 ---
 

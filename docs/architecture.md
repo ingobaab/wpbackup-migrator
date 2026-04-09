@@ -33,27 +33,58 @@ WordPress-Plugin für **Backup/Migration**: REST-API, Migration Key, optional gr
 
 ---
 
-## REST-API – Namespace
+## REST-API – Architektur
 
-- **Namespace:** `wpbackup-migrator/v1` (Konstante `Api::NAMESPACE`).
+- **Namespace:** `wpbackup-migrator/v1` (Konstante `Api::NAMESPACE`)
 - **Basis-URL:** `https://<site>/wp-json/wpbackup-migrator/v1/`
+- **Registrierung:** zentral in `includes/Api.php` via `Api::register_routes()`, fachlich aufgeteilt in:
+  - Basisrouten in `Api` (`/info`, `/verify`)
+  - Datenbankrouten in `Api\Database`
+  - Dateirouten in `Api\Files`
+
+### Endpunkte (aktueller Stand)
+
+| Route | Methode | Auth | Zuständigkeit |
+|------|---------|------|---------------|
+| `/info` | GET | Admin (`manage_options`), i. d. R. Basic Auth + Application Password | Site-/System-Metadaten für Migrationstool |
+| `/verify` | POST | öffentlich, aber mit `key`-Prüfung im Body | Verifikation des Migration Keys, gleiche Payload wie `/info` |
+| `/filesystem-scan` | GET | Migration Key (`Api::check_permission`) | Flache Dateibaum-Liste unter `wp-content` |
+| `/database/*` | mehrere | Migration Key (`Api::check_permission`) | DB-Export-/Migrationsfunktionen |
+| `/uploads/*`, `/plugins/*`, `/themes/*` | mehrere | Migration Key (`Api::check_permission`) | Datei-Export/Download (Zip/Chunks) |
 
 ### Authentifizierungsmuster (wichtig für neue Endpunkte)
 
-1. **`/info` (GET)**  
-   - **Permission:** `current_user_can( 'manage_options' )`  
-   - **Praxis:** **Application Password** + Basic Auth (oder eingeloggter Session-Cookie im Browser).  
-   - Liefert `get_site_info_payload()` (u. a. `database_size`, `media_size`, `list_plugins`, `list_themes`).
+1. **Admin-geschützt (`/info`)**  
+   Permission-Callback prüft `current_user_can( 'manage_options' )`. Für externe Clients ist Application Password + Basic Auth der Standard.
 
-2. **`/verify` (POST)**  
-   - **Permission:** `__return_true` (öffentlich).  
-   - Body: `key` = roher Migration Key (Option).  
-   - Gleiche Payload wie `/info`, wenn Key stimmt.
+2. **Öffentlich mit eigener Verifikation (`/verify`)**  
+   Route ist öffentlich registriert, prüft aber intern den übergebenen Migration Key.
 
-3. **Database-/Files-Routen**  
-   - **Permission:** typischerweise `Api::check_permission` – Migration Key per Header `X-WPBackup-Key` oder Legacy `X-FlyWP-Key`, alternativ Query `secret` (siehe Implementierung in `Api.php`).
+3. **Migration-Key-geschützte Routen (`Database`/`Files`)**  
+   Einheitlich über `Api::check_permission`: Header `X-WPBackup-Key` (oder legacy `X-FlyWP-Key`), alternativ Query-Parameter `secret`.
 
-Neue, **komplexe** Endpunkte sollten **explizit** dokumentiert werden: nur Admin? nur Migration Key? beides optional? Rate-Limits?
+### Antwortmodell von `/info` und `/verify`
+
+Beide Endpunkte liefern dieselbe Kern-Payload aus `get_site_info_payload()`. Zentral sind:
+
+- **Site/Runtime:** `url`, `site_title`, `is_multisite`, `php_version`, `wp_version`, `prefix`
+- **Sicherheit/Identität:** `key`, `username`, `email`
+- **Größen/Metriken:** `database_size`, `media_size`
+- **Listen:** `list_plugins`, `list_themes`
+- **Neu:** `database_info` mit schneller Tabellenübersicht:
+  - Summen: `table_count`, `total_data_bytes`, `total_index_bytes`, `total_bytes`
+  - Details je Tabelle: `name`, `records`, `data_bytes`, `index_bytes`, `total_bytes`
+- **`autoload`:** `wp_options` für `autoload = 'yes'` (Aggregat + Top 20 nach `LENGTH(option_value)`), plus `by_autoload` zur Verteilung aller `autoload`-Werte
+- **`runtime_limits`:** zentrale PHP-`ini_get`-Werte und kompakter OPcache-Status (kein `phpinfo()`)
+
+### Performance-Prinzipien in der REST-Schicht
+
+- **Metadaten statt Vollscan**, wo möglich (z. B. DB-Tabelleninfos über `SHOW TABLE STATUS` statt `COUNT(*)` pro Tabelle).
+- **Einmal laden, mehrfach nutzen** innerhalb eines Requests (z. B. gecachte Tabellenstatusdaten für `database_size` + `database_info`).
+- **Begrenzung großer Antworten** (z. B. `filesystem-scan` mit `max_depth` und Entry-Cap).
+- **Klare Verantwortlichkeit pro Route**, damit kostenintensive Logik gezielt optimiert werden kann.
+
+Neue, komplexe Endpunkte sollten immer explizit dokumentieren: Auth-Modell, Laufzeitprofil, Limits/Caps und Fehlerverhalten.
 
 ---
 
@@ -77,6 +108,8 @@ Neue, **komplexe** Endpunkte sollten **explizit** dokumentiert werden: nur Admin
 
 - **`media_size`:** Schätzung aus DB (`_wp_attachment_metadata`), kein Filesystem-Scan; Details im Code und in `rest-api.md`.
 - **`list_plugins` / `list_themes`:** aus WordPress-APIs (`get_plugins`, `get_mu_plugins`, `wp_get_themes`), sortiert nach Name.
+- **`database_info`:** Tabellenübersicht inkl. Records und Größen aus `SHOW TABLE STATUS` (schnell, keine Vollzählung je Tabelle).
+- **`autoload`:** Analyse großer autoload-Optionen ohne `option_value` zu lesen (SQL `LENGTH`); Detail-Liste auf 20 Einträge begrenzt.
 
 ---
 
