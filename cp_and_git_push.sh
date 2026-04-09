@@ -2,6 +2,6 @@
  rsync -avz . ~/wpbackup-migrator/
  cd ~/wpbackup-migrator/
  git add .
- git commit -m "added databse table in info"
+ git commit -m "first ai experiments working"
  git push
  cd -
